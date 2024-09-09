@@ -63,13 +63,13 @@ class EEGSegment():
 
 
 class EEGDataset(Dataset):
-    def __init__(self, data_dir_path, labels_path, lookup_table_path, original_sampling_freq=250, window_length=10, overlap_factor=0.5, stft_window='hann', stft_nperseg=128, stft_noverlap=None):
+    def __init__(self, data_dir_path, preprocessed_dir, labels_path, lookup_table_path, original_sampling_freq=250, window_length=10, overlap_factor=0.5, stft_window='hann', stft_nperseg=128, stft_noverlap=None):
         # Dataset paths
         self.data_dir = data_dir_path
         self.labels_path = labels_path
         self.lookup_table_path = lookup_table_path
-        self.preprocessed_folder = self.data_dir + '../preprocessed/' + self.data_dir.split('/')[-2] + '/'
-        self.spectrograms_folder = self.data_dir + '../spectrograms/' + self.data_dir.split('/')[-2] + '/'
+        self.preprocessed_folder = preprocessed_dir + '/preprocessed/' + self.data_dir.split('/')[-2] + '/'
+        self.spectrograms_folder = preprocessed_dir + '/spectrograms/' + self.data_dir.split('/')[-2] + '/'
         
         # Preprocessing parameters
         self.window_length = window_length # seconds
@@ -179,7 +179,7 @@ class EEGDataset(Dataset):
     
     
     def preprocessing(self):
-        if not utils.folder_exists(self.preprocessed_folder): os.mkdir(self.preprocessed_folder)
+        if not utils.folder_exists(self.preprocessed_folder): os.makedirs(self.preprocessed_folder, exist_ok=False)
         # if os.listdir(self.preprocessed_folder): return # don't do the preprocessing if the folder is not empty
         
         eeg_files = [ file for file in os.listdir(self.data_dir) if file.endswith('.edf') ]
