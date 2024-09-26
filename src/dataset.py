@@ -1,8 +1,6 @@
 import os
 import torch
 from torch.utils.data import Dataset
-import mne
-import scipy
 from src import utils
 from tqdm import tqdm
 import numpy as np
@@ -40,27 +38,30 @@ class Labels():
     def __str__(self):
         return str(self.as_dict())
 
-
+################################################################################################
 
 class EEGSegment():
-    def __init__(self, segment_filename, edf_filename, eeg_idx, timesteps):
-        self.filename = segment_filename
+    def __init__(self, segment_filename, spectrograms_filename, edf_filename, eeg_idx, timesteps):
         self.edf_filename = edf_filename
+        self.eeg_filename = segment_filename
+        self.spectrograms_filename = spectrograms_filename
         self.eeg_idx = eeg_idx
         self.timesteps = timesteps
     
     def get_data(self):
-        return np.load(self.filename)
+        return np.load(self.eeg_filename)
     
-    def get_spectrograms(self, stft_obj):
-        # TODO load a saved spectrogram if it exists
-        data = self.get_data()
-        return abs(stft_obj.stft(data))**2
-        # if self.spectrograms is None:
-        #     self.spectrograms = abs(stft_obj.stft(self.data))**2
-        # return self.spectrograms
-            
+    def get_spectrograms(self):
+        if utils.file_exists(self.spectrograms_filename):
+            return np.load(self.spectrograms_filename)
+        return self.compute_spectrograms(200) # TODO remove when we are sure all spectrograms are computed
 
+    def compute_spectrograms(self, sampling_freq):
+        data = self.get_data()
+        Sx, _ = utils.stft(data, sampling_freq)
+        return abs(Sx)**2
+
+################################################################################################
 
 class EEGDataset(Dataset):
     def __init__(self, data_dir_path, preprocessed_dir, labels_path, lookup_table_path, original_sampling_freq=250, window_length=10, overlap_factor=0.5, stft_window='hann', stft_nperseg=128, stft_noverlap=None):
@@ -80,12 +81,6 @@ class EEGDataset(Dataset):
         self.notch_filter_cutoff = 60
         self.highpass_filter_cutoff = 1
         
-        # STFT parameters
-        self.stft_window = stft_window
-        self.stft_nperseg = stft_nperseg
-        self.stft_noverlap = stft_noverlap if stft_noverlap is not None else int(stft_nperseg - 7)
-        self.stft_obj = scipy.signal.ShortTimeFFT.from_window(self.stft_window, self.sampling_freq, self.stft_nperseg, self.stft_noverlap, scale_to='magnitude')
-        
         # text data
         self.labels = []                        # one entry per edf file
         # lookup tables
@@ -94,8 +89,15 @@ class EEGDataset(Dataset):
         # EEG data segments
         self.eeg_segments = []                  # one entry for each chunk of EEG data
         self.eeg_idx2edf_filename = []          # one entry per edf file
-        self.eeg_idx2edf_info = []              # one entry per edf file # TODO fix this, json loading not working
-        self.personal_id2eeg_segments_idx = {}  # one entry per person, list of indices of eeg_segments
+        self.edf_filename2eeg_idx = {}          # one entry per edf file
+        self.eeg_idx2edf_info = []              # one entry per edf file
+        
+        # self.personal_id2eeg_segments_idx = {}  # one entry per person, list of indices of eeg_segments
+        self.filename2eeg_segments_idx = {}     # one entry per filename, list of indices of eeg_segments
+        self.personal_id2filenames = {}         # one entry per person, list of filenames
+        
+        self.channel_name2channel_idx = {}
+        # self.channel_idx2channel_name = []
         
         
     def load_labels(self):
@@ -125,22 +127,39 @@ class EEGDataset(Dataset):
         
         for eeg_idx, edf_filename in tqdm(enumerate(eeg_folders), total=len(eeg_folders), desc='Loading EEG data'):
             self.eeg_idx2edf_filename.append(edf_filename)
+            self.edf_filename2eeg_idx[edf_filename] = eeg_idx
             
-            # TODO fix this, json loading not working
-            # info_filename = self.preprocessed_folder + eeg_original_filename + '/info.txt'
-            # with open(info_filename, 'r') as f:
-            #     info = json.load(f)
-            #     self.idx2edf_info.append(info)
+            info_filename = self.preprocessed_folder + edf_filename + '/info.txt'
+            with open(info_filename, 'r') as f:
+                info = json.load(f)
+                self.eeg_idx2edf_info.append(info)
+                channels = [ch for ch in info['ch_names']]
+                for ch in channels:
+                    if 'EEG' not in ch: continue
+                    ch = ch.split(' ')[-1].split('-')[0]
+                    if ch not in self.channel_name2channel_idx:
+                        self.channel_name2channel_idx[ch] = len(self.channel_name2channel_idx)
+                        # self.channel_idx2channel_name.append(ch)
+                
             
             eeg_segment_files = [ file for file in os.listdir(self.preprocessed_folder + edf_filename) if file.endswith('.npy') ]
             eeg_segment_files.sort()
             start = 0
             for segment_file in eeg_segment_files:
                 eeg_file_path = self.preprocessed_folder + edf_filename + '/' + segment_file
-                self.eeg_segments.append( EEGSegment(eeg_file_path, edf_filename, eeg_idx, (start, start+window_len_timesteps)) )
+                spectrograms_file_path = self.spectrograms_folder + edf_filename + '/' + segment_file
+                self.eeg_segments.append( EEGSegment(eeg_file_path, spectrograms_file_path, edf_filename, eeg_idx, (start, start+window_len_timesteps)) )
                 personal_id = self.eeg_idx2personal_id[eeg_idx]
-                if personal_id not in self.personal_id2eeg_segments_idx: self.personal_id2eeg_segments_idx[personal_id] = []
-                self.personal_id2eeg_segments_idx[personal_id].append(len(self.eeg_segments)-1)
+                
+                # if personal_id not in self.personal_id2eeg_segments_idx: self.personal_id2eeg_segments_idx[personal_id] = []
+                # self.personal_id2eeg_segments_idx[personal_id].append(len(self.eeg_segments)-1)
+                
+                if edf_filename not in self.filename2eeg_segments_idx: self.filename2eeg_segments_idx[edf_filename] = []
+                self.filename2eeg_segments_idx[edf_filename].append(len(self.eeg_segments)-1)
+                
+                if personal_id not in self.personal_id2filenames: self.personal_id2filenames[personal_id] = []
+                if edf_filename not in self.personal_id2filenames[personal_id]: self.personal_id2filenames[personal_id].append(edf_filename)
+                
                 start += step
 
                 
@@ -148,72 +167,7 @@ class EEGDataset(Dataset):
         self.load_labels() # Load text data
         self.load_lookup_table() # Load lookup table
         self.load_eeg_data() # Load EEG data
-                              
-    
-    def get_nr_patients(self):
-        return len(self.personal_id2eeg_segments_idx.keys())
-    
-    
-    def get_patient_id(self, segment_idx):
-        return self.eeg_idx2personal_id[self.eeg_segments[segment_idx].eeg_idx]
-    
-    
-    def filter_and_downsample(self, data):
-        # Notch filter (to eliminate power line interference)
-        data = utils.notch_filter(data, self.original_sampling_freq, cutoff_freq=self.notch_filter_cutoff)
-        
-        # High pass filter (to remove DC oﬀset and baseline ﬂuctuations)
-        data = utils.highpass_filter(data, self.original_sampling_freq, cutoff_freq=self.highpass_filter_cutoff)
-        
-        # Downsampling (to 200Hz)
-        data = utils.downsample(data, self.original_sampling_freq, self.sampling_freq)
-        
-        # Apply Montage (Common Average Reference)
-        average_potential = np.mean(data, axis=0)
-        data = data - average_potential
-        
-        # Noise statistics-based artifact rejection (to remove high amplitude noise)
-        # TODO ?
-            
-        return data
-    
-    
-    def preprocessing(self):
-        if not utils.folder_exists(self.preprocessed_folder): os.makedirs(self.preprocessed_folder, exist_ok=False)
-        # if os.listdir(self.preprocessed_folder): return # don't do the preprocessing if the folder is not empty
-        
-        eeg_files = [ file for file in os.listdir(self.data_dir) if file.endswith('.edf') ]
-        eeg_files.sort()
-        
-        
-        for idx, file in tqdm(enumerate(eeg_files), total=len(eeg_files), desc='Preprocessing and segmenting EEG data'):
-            preprocessed_eeg_folder_path = self.preprocessed_folder + '/' + file.split('.')[0] + '/'
-            if not utils.folder_exists(preprocessed_eeg_folder_path): os.mkdir(preprocessed_eeg_folder_path)
-            else: continue
-            eeg_file_path = os.path.join(self.data_dir, file)
-            eeg_edf = mne.io.read_raw_edf(eeg_file_path, preload=True, verbose='ERROR')
-            eeg_raw_data = eeg_edf.get_data()
-            
-            # storing edf info
-            info = {}
-            # for info_key in ['ch_names', 'nchan', 'chs', 'meas_date', 'highpass', 'lowpass', 'subject_info']: 
-            for info_key in ['ch_names']: 
-                info[info_key] = eeg_edf.info[info_key]
-            info_file_path = preprocessed_eeg_folder_path + 'info.txt'
-            if not os.path.exists(info_file_path):
-                with open(info_file_path, 'w') as f:
-                    json.dump(info, f)
-            
-            eeg_raw_data = self.filter_and_downsample(eeg_raw_data)
-            
-            # splitting the data into equal-sized segments 
-            window_len_timesteps = int(self.sampling_freq * (self.window_length))
-            step = int(self.sampling_freq * (self.window_length*self.overlap_factor))
-            for i in range(0, eeg_raw_data.shape[1], step):
-                segment = eeg_raw_data[:, i:i+window_len_timesteps]
-                if not segment.shape[1] < window_len_timesteps: 
-                    np.save(preprocessed_eeg_folder_path + f'{i}.npy', segment)
-                    
+
     
     def __len__(self):
         return len(self.eeg_segments)
@@ -221,22 +175,40 @@ class EEGDataset(Dataset):
     
     def __getitem__(self, idx):
         segment = self.eeg_segments[idx]    
-        data = segment.get_data()[:self.n_channels, :] # TODO deal with different number of channels
+        
+        data = segment.get_data()
+        x = torch.zeros(len(self.channel_name2channel_idx), data.shape[1])
+        
+        spectrograms = None
+        try:
+            spectrograms = segment.get_spectrograms()
+        except:    
+            spectrograms = segment.compute_spectrograms(self.sampling_freq)
+        spectrograms_padded = torch.zeros(len(self.channel_name2channel_idx), spectrograms.shape[1], spectrograms.shape[2])
+        
+        channels = self.eeg_idx2edf_info[segment.eeg_idx]['ch_names']
+        for ch in channels:
+            if ch in self.channel_name2channel_idx:
+                ch_idx = self.channel_name2channel_idx[ch]
+                x[ch_idx, :] = torch.tensor(data[channels.index(ch), :])
+                spectrograms_padded[ch_idx, :, :] = torch.tensor(spectrograms[channels.index(ch), :, :])
+        
         filename = self.eeg_idx2edf_filename[segment.eeg_idx]
         labels = self.labels[segment.eeg_idx].as_dict()
-        # spectrograms = segment.get_spectrograms(self.stft_obj)
-        # return {'data': data, 'segment_timesteps': segment.timesteps, 'filename': filename, 'spectrograms': spectrograms, 'labels': labels}
-        return {'data': data, 'segment_timesteps': segment.timesteps, 'filename': filename, 'labels': labels}
-    
 
-    def get_patient_segment_indexes(self, patient_id):
-        return self.personal_id2eeg_segments_idx[patient_id]
+        return {'data': x, 'segment_timesteps': segment.timesteps, 'filename': filename, 'labels': labels, 'spectrograms': spectrograms_padded}
+    
+    
+    def set_channel_name2channel_idx_dictionary(self, channel_name2channel_idx):
+        self.channel_name2channel_idx = channel_name2channel_idx
     
     
     def get_subsets(self, personal_ids, train_ratio=0.6, val_ratio=0.2, test_ratio=0.2, seed=None):
         assert train_ratio + val_ratio + test_ratio <= 1.
         if seed is not None: np.random.seed(seed)
-        segments_idx_per_patient = [self.personal_id2eeg_segments_idx[personal_id] for personal_id in personal_ids if personal_id in self.personal_id2eeg_segments_idx]
+        segments_idx_per_patient = [self.get_patient_segment_indexes(personal_id) for personal_id in personal_ids if self.is_patient_in_dataset(personal_id)]
+        # ref = [self.personal_id2eeg_segments_idx[personal_id] for personal_id in personal_ids if personal_id in self.personal_id2eeg_segments_idx]
+        # assert ref == segments_idx_per_patient
         
         train_n_patients = int(train_ratio * len(personal_ids))
         val_n_patients = int(val_ratio * len(personal_ids))
@@ -251,3 +223,36 @@ class EEGDataset(Dataset):
         test_subset = torch.utils.data.Subset(self, test_segments_idx)
         
         return train_subset, val_subset, test_subset
+    
+    def is_patient_in_dataset(self, personal_id):
+        return personal_id in self.personal_id2eeg_idx
+    
+    def get_nr_patients(self):
+        return len(self.personal_id2eeg_idx.keys())
+    
+    def get_patient_ids(self):
+        return list(self.personal_id2eeg_idx.keys())
+    
+    def get_patient_id(self, segment_idx):
+        return self.eeg_idx2personal_id[self.eeg_segments[segment_idx].eeg_idx]
+    
+    def get_patient_eeg_recordings(self, patient_id):
+        return self.personal_id2filenames[patient_id]
+    
+    def get_eeg_recording_segment_indexes(self, filename):
+        return self.filename2eeg_segments_idx[filename]
+    
+    def get_filename_segments_data(self, filename):
+        return [ self[idx]['data'] for idx in self.filename2eeg_segments_idx[filename] ]
+    
+    def get_patient_segment_indexes(self, patient_id):
+        # ref = self.personal_id2eeg_segments_idx[patient_id]
+        eeg_recordings = self.get_patient_eeg_recordings(patient_id)
+        indexes = [ eeg_idx for filename in eeg_recordings for eeg_idx in self.get_eeg_recording_segment_indexes(filename) ]
+        return indexes
+    
+    def get_labels(self, filename):
+        return self.labels[self.edf_filename2eeg_idx[filename]].as_dict()
+    
+    def get_filenames(self):
+        return self.filename2eeg_segments_idx.keys()

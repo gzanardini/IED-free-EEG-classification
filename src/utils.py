@@ -1,40 +1,64 @@
-from scipy.signal import spectrogram, butter, filtfilt, resample
+from scipy.signal import butter, filtfilt, resample
+import scipy
 import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-# TODO update
-def plot_image(img):
-    plt.figure(figsize=(10, 6))
-    # plt.pcolormesh(t, f, 10 * np.log10(Sxx), shading='gouraud', vmin=vmin, vmax=vmax)
-    plt.imshow(img, cmap='plasma')
-    # plt.colorbar(label='Power Spectral Density (dB)')
-    # plt.ylabel('Frequency (Hz)')
-    # plt.xlabel('Time (s)')
-    # plt.title('Spectrogram')
+
+def plot(sample, figsize_x=10, figsize_y=10, label=""):
+    plt.figure(figsize=(figsize_x, figsize_y), )
+    plt.plot(sample, label=label)
+    if label: plt.legend()
     plt.show()
     
-# TODO update
-def plot_spectrogram(f, t, Sxx, vmin=-200, vmax=0):
-    plt.figure(figsize=(10, 6))
-    plt.pcolormesh(t, f, 10 * np.log10(Sxx), shading='gouraud', vmin=vmin, vmax=vmax)
-    plt.colorbar(label='Power Spectral Density (dB)')
-    plt.ylabel('Frequency (Hz)')
-    plt.xlabel('Time (s)')
-    plt.title('Spectrogram')
-    plt.show()
+    
+def plot_spectrogram(spectrogram, extent, figsize_x=10, figsize_y=10):
+    # TODO min max normalization
+    min = np.min(spectrogram)
+    max = np.max(spectrogram)
+    
+    s = 10*np.log10(spectrogram)
+    
+    fig, axx = plt.subplots(1,1, figsize=(figsize_x, figsize_y), sharex='all', sharey='all')
+    t_lo, t_hi, f_lo, f_hi = extent
+    
+    axx.set_xlim(t_lo, t_hi)
+    axx.set_ylim(f_lo, f_hi)
+    
+    kw = dict(origin='lower', aspect='auto', cmap='viridis')
+    im = axx.imshow( s, extent=extent, **kw)
+    fig.colorbar(im, ax=axx, label="PSD $|S_z(t, f)|^2$")
+    fig.show()
 
-    # TODO update
-def compute_and_plot_spectrogram(data, sf, vmin=-200, vmax=0):
-    f, t, Sxx = spectrogram(data, fs=sf, nperseg=256)
-    plot_spectrogram(f, t, Sxx, vmin, vmax)
 
-# TODO update
-def spectrogram_to_image(Sxx, vmin=-200, vmax=0):
-    Sxx_log = 10 * np.log10(Sxx)
-    Sxx_norm = (Sxx_log - vmin) / (vmax - vmin)
-    Sxx_norm = np.clip(Sxx_norm, 0, 1)
-    return (Sxx_norm * 255).astype(np.uint8) # to gray scale (0-255)
+def stft(data, sampling_freq):
+    stft_window = 'hann'
+    stft_nperseg = 128
+    stft_noverlap = int(stft_nperseg - 7)
+    stft_obj = scipy.signal.ShortTimeFFT.from_window(stft_window, sampling_freq, stft_nperseg, stft_noverlap, scale_to='magnitude')
+    
+    Sx = stft_obj.stft(data)
+    extent = stft_obj.extent(data.shape[0], center_bins=True)
+    # delta_f = stft_obj.delta_f
+    delta_t = stft_obj.delta_t
+    
+    # remove time values outside the original window range
+    i = 0
+    t_lo, t_hi, _, _ = extent
+    while t_lo < 0:
+        i += 1
+        t_lo += delta_t
+        t_hi -= delta_t
+    Sx = Sx[:, i:-i]
+    extent = (t_lo, t_hi, extent[2], extent[3])
+    
+    return Sx, extent
+
+
+def compute_and_plot_spectrogram(sample, sampling_freq):
+    Sx, extent = stft(sample, sampling_freq)
+    spectrogram = abs(Sx)**2
+    plot_spectrogram(spectrogram, extent, figsize_x=50, figsize_y=5)
 
     
 def notch_filter(data, sf, cutoff_freq=60, order=4, quality_factor=1):
