@@ -67,10 +67,12 @@ class BaseDataset(Dataset):
             y = self.description['epilepsy']
         elif self.target_name is not None:
             y = self.description[self.target_name] #backup
+
         if isinstance(y, pd.Series):
             y = y.to_list()
         if self.transform is not None:
             X = self.transform(X)
+
         return X, y
 
     def __len__(self):

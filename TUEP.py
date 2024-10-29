@@ -80,11 +80,13 @@ class TUH(BaseConcatDataset):
         descriptions = _sort_chronologically(descriptions)
         # limit to specified recording ids before doing slow stuff
         if recording_ids is not None:
+
             if not isinstance(recording_ids, Iterable):
-                # Assume it is an integer specifying number
-                # of recordings to load
+                # Assume it is an integer specifying number of recordings to load
                 recording_ids = range(recording_ids)
+
             descriptions = descriptions[recording_ids]
+            
         # this is the second loop (slow)
         # create datasets gathering more info about the files touching them
         # reading the raws and potentially preloading the data
