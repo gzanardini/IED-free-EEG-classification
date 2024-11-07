@@ -145,7 +145,7 @@ class TUH(BaseConcatDataset):
                 c: "misc" for c, t in zip(non_eeg_names, non_eeg_types) if t == "eeg"
             }
             if mapping_non_eeg_types:
-                raw.set_channel_types(mapping_non_eeg_types)
+                raw.set_channel_types(mapping_non_eeg_types, verbose="error")
 
         if mapping_eeg_names:
             # Set 1005 channels type to "eeg":
@@ -448,11 +448,11 @@ class TUHEpilepsy(TUH):
 
         if '00_epilepsy' in tokens:
             return {
-                "epilepsy": "Y"
+                "epilepsy": 0
             }
         elif '01_no_epilepsy' in tokens:
             return {
-                "epilepsy": "N"
+                "epilepsy": 1
             }
         else:
             raise ValueError("No epilepsy labels found.")

@@ -67,7 +67,6 @@ class BaseDataset(Dataset):
             y = self.description['epilepsy']
         elif self.target_name is not None:
             y = self.description[self.target_name] #backup
-
         if isinstance(y, pd.Series):
             y = y.to_list()
         if self.transform is not None:
@@ -138,7 +137,6 @@ class BaseDataset(Dataset):
                                   f" added to description.", UserWarning)
         # return a list of str if there are multiple targets and a str otherwise
         return target_name if len(target_name) > 1 else target_name[0]
-
 
 class EEGWindowsDataset(BaseDataset):
     """Returns windows from an mne.Raw object, its window indices, along with a target.
@@ -272,7 +270,6 @@ class EEGWindowsDataset(BaseDataset):
                 self._description.pop(key)
         self._description = pd.concat([self.description, description])
 
-
 class WindowsDataset(BaseDataset):
     """Returns windows from an mne.Epochs object along with a target.
 
@@ -386,7 +383,6 @@ class WindowsDataset(BaseDataset):
                                    f"rename or set overwrite to True.")
                 self._description.pop(key)
         self._description = pd.concat([self.description, description])
-
 
 class BaseConcatDataset(ConcatDataset):
     """A base class for concatenated datasets. Holds either mne.Raw or

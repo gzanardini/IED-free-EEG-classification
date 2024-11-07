@@ -1,4 +1,4 @@
-﻿subject,session,segment,EEG Label,IEDs,Ictal activity,Slowing,Sleep,Sleep patterns,Medications,Artifacts,History of seizures,Age,Gender,Clinical Report
+﻿subject,session,segment,EEG Label,IEDs,Ictal activity,Slowing,Sleep,Sleep patterns,Medications,Artifacts,History of seizures,age,gender,Clinical Report
  aaaaaebo,1,0,NORMAL,ABSENT,ABSENT,THETA,DROWSY,vertex waves,PRESENT,EMG,ABSENT,68,FEMALE,"CLINICAL HISTORY: This is a 68-year-old woman with episodic feelings of light-headedness and a faint feeling with a strange smell.  No loss of consciousness.  Symptoms began six months ago and are now decreasing.
 MEDICATIONS: Lipitor, Diltiazem, aspirin, Lisinopril.
 INTRODUCTION: Digital video EEG is performed in the lab using standard 10-20 system of electrode placement with one channel of EKG. Hyperventilation was not performed, but photic stimulation was completed.  This is an awake record.
