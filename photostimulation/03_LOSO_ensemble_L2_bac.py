@@ -222,7 +222,6 @@ for run_n in range(N_RUNS):
     # subject_preds = []
     # for subj in unique_subjects:
     #     subject_preds.append((subj, y_preds_outer[unique_subjects == subj][0], y_true_outer[unique_subjects == subj][0]))
-
     # print(subject_preds)
 
     final_bac = balanced_accuracy_score(y_true_outer, y_preds_outer)

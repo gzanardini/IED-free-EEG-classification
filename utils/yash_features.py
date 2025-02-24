@@ -440,8 +440,11 @@ def clustering_coef_wu(W):
     C : Nx1 np.ndarray
         clustering coefficient vector
     """
+    W=np.clip(W,0,1)
     # Ensure weights are between 0 and 1
     if np.max(W) > 1 or np.min(W) < 0:
+        print(f"Max weight: {np.max(W)}")
+        print(f"Min weight: {np.min(W)}")
         raise ValueError("All weights must be between 0 and 1")
 
     # Degrees calculation
@@ -1642,10 +1645,3 @@ def run_UTM_seg(data, Fs, MONTAGE, sec):
             kurtosis(output, fisher=False, axis=0)
             ])
         return output_combiner
-
-
-
-
-
-
-

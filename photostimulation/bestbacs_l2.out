@@ -42529,3 +42529,249 @@ New best BAC for cc: 0.8435828877005347
 Feature: cc, Montage: Cz, Segment Length: 5, Significance: 0.001
 Feature: cc, Montage: Cz, Segment Length: 5, Significance: 0.0005
 Feature: cc, Montage: Cz, Segment Length: 5, Significance: 0.0001
+Feature: cc, Montage: Cz, Segment Length: 5, Significance: 1e-05
+Feature: cc, Montage: Cz, Segment Length: 5, Significance: 1e-06
+Feature: cc, Montage: Cz, Segment Length: 10, Significance: 0.001
+Feature: cc, Montage: Cz, Segment Length: 10, Significance: 0.0005
+Feature: cc, Montage: Cz, Segment Length: 10, Significance: 0.0001
+Feature: cc, Montage: Cz, Segment Length: 10, Significance: 1e-05
+Feature: cc, Montage: Cz, Segment Length: 10, Significance: 1e-06
+New best BAC for cc: 0.8451426024955437
+Feature: cc, Montage: BipolarDB, Segment Length: 1, Significance: 0.001
+Feature: cc, Montage: BipolarDB, Segment Length: 1, Significance: 0.0005
+Feature: cc, Montage: BipolarDB, Segment Length: 1, Significance: 0.0001
+Feature: cc, Montage: BipolarDB, Segment Length: 1, Significance: 1e-05
+Feature: cc, Montage: BipolarDB, Segment Length: 1, Significance: 1e-06
+Feature: cc, Montage: BipolarDB, Segment Length: 2, Significance: 0.001
+Feature: cc, Montage: BipolarDB, Segment Length: 2, Significance: 0.0005
+Feature: cc, Montage: BipolarDB, Segment Length: 2, Significance: 0.0001
+Feature: cc, Montage: BipolarDB, Segment Length: 2, Significance: 1e-05
+Feature: cc, Montage: BipolarDB, Segment Length: 2, Significance: 1e-06
+Feature: cc, Montage: BipolarDB, Segment Length: 5, Significance: 0.001
+Feature: cc, Montage: BipolarDB, Segment Length: 5, Significance: 0.0005
+Feature: cc, Montage: BipolarDB, Segment Length: 5, Significance: 0.0001
+Feature: cc, Montage: BipolarDB, Segment Length: 5, Significance: 1e-05
+Feature: cc, Montage: BipolarDB, Segment Length: 5, Significance: 1e-06
+Feature: cc, Montage: BipolarDB, Segment Length: 10, Significance: 0.001
+Feature: cc, Montage: BipolarDB, Segment Length: 10, Significance: 0.0005
+Feature: cc, Montage: BipolarDB, Segment Length: 10, Significance: 0.0001
+Feature: cc, Montage: BipolarDB, Segment Length: 10, Significance: 1e-05
+Feature: cc, Montage: BipolarDB, Segment Length: 10, Significance: 1e-06
+Feature: cc, Montage: Laplacian, Segment Length: 1, Significance: 0.001
+Feature: cc, Montage: Laplacian, Segment Length: 1, Significance: 0.0005
+Feature: cc, Montage: Laplacian, Segment Length: 1, Significance: 0.0001
+Feature: cc, Montage: Laplacian, Segment Length: 1, Significance: 1e-05
+Feature: cc, Montage: Laplacian, Segment Length: 1, Significance: 1e-06
+Feature: cc, Montage: Laplacian, Segment Length: 2, Significance: 0.001
+Feature: cc, Montage: Laplacian, Segment Length: 2, Significance: 0.0005
+Feature: cc, Montage: Laplacian, Segment Length: 2, Significance: 0.0001
+Feature: cc, Montage: Laplacian, Segment Length: 2, Significance: 1e-05
+Feature: cc, Montage: Laplacian, Segment Length: 2, Significance: 1e-06
+Feature: cc, Montage: Laplacian, Segment Length: 5, Significance: 0.001
+Feature: cc, Montage: Laplacian, Segment Length: 5, Significance: 0.0005
+Feature: cc, Montage: Laplacian, Segment Length: 5, Significance: 0.0001
+Feature: cc, Montage: Laplacian, Segment Length: 5, Significance: 1e-05
+Feature: cc, Montage: Laplacian, Segment Length: 5, Significance: 1e-06
+Feature: cc, Montage: Laplacian, Segment Length: 10, Significance: 0.001
+Feature: cc, Montage: Laplacian, Segment Length: 10, Significance: 0.0005
+Feature: cc, Montage: Laplacian, Segment Length: 10, Significance: 0.0001
+Feature: cc, Montage: Laplacian, Segment Length: 10, Significance: 1e-05
+Feature: cc, Montage: Laplacian, Segment Length: 10, Significance: 1e-06
+Feature: cwt, Montage: CAR, Segment Length: 1, Significance: 0.001
+New best BAC for cwt: 0.5
+Feature: cwt, Montage: CAR, Segment Length: 1, Significance: 0.0005
+Feature: cwt, Montage: CAR, Segment Length: 1, Significance: 0.0001
+Feature: cwt, Montage: CAR, Segment Length: 1, Significance: 1e-05
+New best BAC for cwt: 0.5147058823529411
+Feature: cwt, Montage: CAR, Segment Length: 1, Significance: 1e-06
+Feature: cwt, Montage: CAR, Segment Length: 2, Significance: 0.001
+Feature: cwt, Montage: CAR, Segment Length: 2, Significance: 0.0005
+Feature: cwt, Montage: CAR, Segment Length: 2, Significance: 0.0001
+Feature: cwt, Montage: CAR, Segment Length: 2, Significance: 1e-05
+Feature: cwt, Montage: CAR, Segment Length: 2, Significance: 1e-06
+Feature: cwt, Montage: CAR, Segment Length: 5, Significance: 0.001
+New best BAC for cwt: 0.5169340463458111
+Feature: cwt, Montage: CAR, Segment Length: 5, Significance: 0.0005
+New best BAC for cwt: 0.5512477718360071
+Feature: cwt, Montage: CAR, Segment Length: 5, Significance: 0.0001
+Feature: cwt, Montage: CAR, Segment Length: 5, Significance: 1e-05
+Feature: cwt, Montage: CAR, Segment Length: 5, Significance: 1e-06
+No significant features found
+Feature: cwt, Montage: CAR, Segment Length: 10, Significance: 0.001
+Feature: cwt, Montage: CAR, Segment Length: 10, Significance: 0.0005
+Feature: cwt, Montage: CAR, Segment Length: 10, Significance: 0.0001
+Feature: cwt, Montage: CAR, Segment Length: 10, Significance: 1e-05
+Feature: cwt, Montage: CAR, Segment Length: 10, Significance: 1e-06
+No significant features found
+Feature: cwt, Montage: Cz, Segment Length: 1, Significance: 0.001
+Feature: cwt, Montage: Cz, Segment Length: 1, Significance: 0.0005
+Feature: cwt, Montage: Cz, Segment Length: 1, Significance: 0.0001
+Feature: cwt, Montage: Cz, Segment Length: 1, Significance: 1e-05
+New best BAC for cwt: 0.6165329768270945
+Feature: cwt, Montage: Cz, Segment Length: 1, Significance: 1e-06
+Feature: cwt, Montage: Cz, Segment Length: 2, Significance: 0.001
+Feature: cwt, Montage: Cz, Segment Length: 2, Significance: 0.0005
+Feature: cwt, Montage: Cz, Segment Length: 2, Significance: 0.0001
+Feature: cwt, Montage: Cz, Segment Length: 2, Significance: 1e-05
+Feature: cwt, Montage: Cz, Segment Length: 2, Significance: 1e-06
+Feature: cwt, Montage: Cz, Segment Length: 5, Significance: 0.001
+Feature: cwt, Montage: Cz, Segment Length: 5, Significance: 0.0005
+Feature: cwt, Montage: Cz, Segment Length: 5, Significance: 0.0001
+Feature: cwt, Montage: Cz, Segment Length: 5, Significance: 1e-05
+Feature: cwt, Montage: Cz, Segment Length: 5, Significance: 1e-06
+Feature: cwt, Montage: Cz, Segment Length: 10, Significance: 0.001
+Feature: cwt, Montage: Cz, Segment Length: 10, Significance: 0.0005
+Feature: cwt, Montage: Cz, Segment Length: 10, Significance: 0.0001
+Feature: cwt, Montage: Cz, Segment Length: 10, Significance: 1e-05
+Feature: cwt, Montage: Cz, Segment Length: 10, Significance: 1e-06
+Feature: cwt, Montage: BipolarDB, Segment Length: 1, Significance: 0.001
+Feature: cwt, Montage: BipolarDB, Segment Length: 1, Significance: 0.0005
+New best BAC for cwt: 0.6198752228163993
+Feature: cwt, Montage: BipolarDB, Segment Length: 1, Significance: 0.0001
+Feature: cwt, Montage: BipolarDB, Segment Length: 1, Significance: 1e-05
+New best BAC for cwt: 0.678698752228164
+Feature: cwt, Montage: BipolarDB, Segment Length: 1, Significance: 1e-06
+Feature: cwt, Montage: BipolarDB, Segment Length: 2, Significance: 0.001
+Feature: cwt, Montage: BipolarDB, Segment Length: 2, Significance: 0.0005
+Feature: cwt, Montage: BipolarDB, Segment Length: 2, Significance: 0.0001
+Feature: cwt, Montage: BipolarDB, Segment Length: 2, Significance: 1e-05
+Feature: cwt, Montage: BipolarDB, Segment Length: 2, Significance: 1e-06
+Feature: cwt, Montage: BipolarDB, Segment Length: 5, Significance: 0.001
+Feature: cwt, Montage: BipolarDB, Segment Length: 5, Significance: 0.0005
+Feature: cwt, Montage: BipolarDB, Segment Length: 5, Significance: 0.0001
+Feature: cwt, Montage: BipolarDB, Segment Length: 5, Significance: 1e-05
+Feature: cwt, Montage: BipolarDB, Segment Length: 5, Significance: 1e-06
+Feature: cwt, Montage: BipolarDB, Segment Length: 10, Significance: 0.001
+New best BAC for cwt: 0.7259358288770054
+Feature: cwt, Montage: BipolarDB, Segment Length: 10, Significance: 0.0005
+Feature: cwt, Montage: BipolarDB, Segment Length: 10, Significance: 0.0001
+Feature: cwt, Montage: BipolarDB, Segment Length: 10, Significance: 1e-05
+Feature: cwt, Montage: BipolarDB, Segment Length: 10, Significance: 1e-06
+Feature: cwt, Montage: Laplacian, Segment Length: 1, Significance: 0.001
+Feature: cwt, Montage: Laplacian, Segment Length: 1, Significance: 0.0005
+Feature: cwt, Montage: Laplacian, Segment Length: 1, Significance: 0.0001
+Feature: cwt, Montage: Laplacian, Segment Length: 1, Significance: 1e-05
+Feature: cwt, Montage: Laplacian, Segment Length: 1, Significance: 1e-06
+Feature: cwt, Montage: Laplacian, Segment Length: 2, Significance: 0.001
+Feature: cwt, Montage: Laplacian, Segment Length: 2, Significance: 0.0005
+Feature: cwt, Montage: Laplacian, Segment Length: 2, Significance: 0.0001
+Feature: cwt, Montage: Laplacian, Segment Length: 2, Significance: 1e-05
+Feature: cwt, Montage: Laplacian, Segment Length: 2, Significance: 1e-06
+Feature: cwt, Montage: Laplacian, Segment Length: 5, Significance: 0.001
+Feature: cwt, Montage: Laplacian, Segment Length: 5, Significance: 0.0005
+Feature: cwt, Montage: Laplacian, Segment Length: 5, Significance: 0.0001
+Feature: cwt, Montage: Laplacian, Segment Length: 5, Significance: 1e-05
+Feature: cwt, Montage: Laplacian, Segment Length: 5, Significance: 1e-06
+Feature: cwt, Montage: Laplacian, Segment Length: 10, Significance: 0.001
+Feature: cwt, Montage: Laplacian, Segment Length: 10, Significance: 0.0005
+Feature: cwt, Montage: Laplacian, Segment Length: 10, Significance: 0.0001
+Feature: cwt, Montage: Laplacian, Segment Length: 10, Significance: 1e-05
+Feature: cwt, Montage: Laplacian, Segment Length: 10, Significance: 1e-06
+Feature: dwt, Montage: CAR, Segment Length: 1, Significance: 0.001
+New best BAC for dwt: 0.4772727272727273
+Feature: dwt, Montage: CAR, Segment Length: 1, Significance: 0.0005
+New best BAC for dwt: 0.6492869875222816
+Feature: dwt, Montage: CAR, Segment Length: 1, Significance: 0.0001
+New best BAC for dwt: 0.6737967914438503
+Feature: dwt, Montage: CAR, Segment Length: 1, Significance: 1e-05
+New best BAC for dwt: 0.7179144385026739
+Feature: dwt, Montage: CAR, Segment Length: 1, Significance: 1e-06
+Feature: dwt, Montage: CAR, Segment Length: 2, Significance: 0.001
+Feature: dwt, Montage: CAR, Segment Length: 2, Significance: 0.0005
+Feature: dwt, Montage: CAR, Segment Length: 2, Significance: 0.0001
+Feature: dwt, Montage: CAR, Segment Length: 2, Significance: 1e-05
+Feature: dwt, Montage: CAR, Segment Length: 2, Significance: 1e-06
+Feature: dwt, Montage: CAR, Segment Length: 5, Significance: 0.001
+Feature: dwt, Montage: CAR, Segment Length: 5, Significance: 0.0005
+Feature: dwt, Montage: CAR, Segment Length: 5, Significance: 0.0001
+Feature: dwt, Montage: CAR, Segment Length: 5, Significance: 1e-05
+Feature: dwt, Montage: CAR, Segment Length: 5, Significance: 1e-06
+Feature: dwt, Montage: CAR, Segment Length: 10, Significance: 0.001
+Feature: dwt, Montage: CAR, Segment Length: 10, Significance: 0.0005
+Feature: dwt, Montage: CAR, Segment Length: 10, Significance: 0.0001
+Feature: dwt, Montage: CAR, Segment Length: 10, Significance: 1e-05
+Feature: dwt, Montage: CAR, Segment Length: 10, Significance: 1e-06
+Feature: dwt, Montage: Cz, Segment Length: 1, Significance: 0.001
+Feature: dwt, Montage: Cz, Segment Length: 1, Significance: 0.0005
+New best BAC for dwt: 0.7194741532976827
+Feature: dwt, Montage: Cz, Segment Length: 1, Significance: 0.0001
+Feature: dwt, Montage: Cz, Segment Length: 1, Significance: 1e-05
+Feature: dwt, Montage: Cz, Segment Length: 1, Significance: 1e-06
+Feature: dwt, Montage: Cz, Segment Length: 2, Significance: 0.001
+Feature: dwt, Montage: Cz, Segment Length: 2, Significance: 0.0005
+Feature: dwt, Montage: Cz, Segment Length: 2, Significance: 0.0001
+Feature: dwt, Montage: Cz, Segment Length: 2, Significance: 1e-05
+Feature: dwt, Montage: Cz, Segment Length: 2, Significance: 1e-06
+New best BAC for dwt: 0.7259358288770054
+Feature: dwt, Montage: Cz, Segment Length: 5, Significance: 0.001
+Feature: dwt, Montage: Cz, Segment Length: 5, Significance: 0.0005
+Feature: dwt, Montage: Cz, Segment Length: 5, Significance: 0.0001
+New best BAC for dwt: 0.7375222816399287
+Feature: dwt, Montage: Cz, Segment Length: 5, Significance: 1e-05
+New best BAC for dwt: 0.7488859180035651
+Feature: dwt, Montage: Cz, Segment Length: 5, Significance: 1e-06
+Feature: dwt, Montage: Cz, Segment Length: 10, Significance: 0.001
+Feature: dwt, Montage: Cz, Segment Length: 10, Significance: 0.0005
+Feature: dwt, Montage: Cz, Segment Length: 10, Significance: 0.0001
+Feature: dwt, Montage: Cz, Segment Length: 10, Significance: 1e-05
+New best BAC for dwt: 0.7571301247771836
+Feature: dwt, Montage: Cz, Segment Length: 10, Significance: 1e-06
+Feature: dwt, Montage: BipolarDB, Segment Length: 1, Significance: 0.001
+Feature: dwt, Montage: BipolarDB, Segment Length: 1, Significance: 0.0005
+Feature: dwt, Montage: BipolarDB, Segment Length: 1, Significance: 0.0001
+Feature: dwt, Montage: BipolarDB, Segment Length: 1, Significance: 1e-05
+Feature: dwt, Montage: BipolarDB, Segment Length: 1, Significance: 1e-06
+Feature: dwt, Montage: BipolarDB, Segment Length: 2, Significance: 0.001
+Feature: dwt, Montage: BipolarDB, Segment Length: 2, Significance: 0.0005
+Feature: dwt, Montage: BipolarDB, Segment Length: 2, Significance: 0.0001
+Feature: dwt, Montage: BipolarDB, Segment Length: 2, Significance: 1e-05
+Feature: dwt, Montage: BipolarDB, Segment Length: 2, Significance: 1e-06
+Feature: dwt, Montage: BipolarDB, Segment Length: 5, Significance: 0.001
+Feature: dwt, Montage: BipolarDB, Segment Length: 5, Significance: 0.0005
+Feature: dwt, Montage: BipolarDB, Segment Length: 5, Significance: 0.0001
+Feature: dwt, Montage: BipolarDB, Segment Length: 5, Significance: 1e-05
+Feature: dwt, Montage: BipolarDB, Segment Length: 5, Significance: 1e-06
+Feature: dwt, Montage: BipolarDB, Segment Length: 10, Significance: 0.001
+Feature: dwt, Montage: BipolarDB, Segment Length: 10, Significance: 0.0005
+Feature: dwt, Montage: BipolarDB, Segment Length: 10, Significance: 0.0001
+Feature: dwt, Montage: BipolarDB, Segment Length: 10, Significance: 1e-05
+Feature: dwt, Montage: BipolarDB, Segment Length: 10, Significance: 1e-06
+Feature: dwt, Montage: Laplacian, Segment Length: 1, Significance: 0.001
+Feature: dwt, Montage: Laplacian, Segment Length: 1, Significance: 0.0005
+Feature: dwt, Montage: Laplacian, Segment Length: 1, Significance: 0.0001
+Feature: dwt, Montage: Laplacian, Segment Length: 1, Significance: 1e-05
+Feature: dwt, Montage: Laplacian, Segment Length: 1, Significance: 1e-06
+Feature: dwt, Montage: Laplacian, Segment Length: 2, Significance: 0.001
+Feature: dwt, Montage: Laplacian, Segment Length: 2, Significance: 0.0005
+Feature: dwt, Montage: Laplacian, Segment Length: 2, Significance: 0.0001
+Feature: dwt, Montage: Laplacian, Segment Length: 2, Significance: 1e-05
+Feature: dwt, Montage: Laplacian, Segment Length: 2, Significance: 1e-06
+Feature: dwt, Montage: Laplacian, Segment Length: 5, Significance: 0.001
+Feature: dwt, Montage: Laplacian, Segment Length: 5, Significance: 0.0005
+Feature: dwt, Montage: Laplacian, Segment Length: 5, Significance: 0.0001
+New best BAC for dwt: 0.8306595365418895
+Feature: dwt, Montage: Laplacian, Segment Length: 5, Significance: 1e-05
+Feature: dwt, Montage: Laplacian, Segment Length: 5, Significance: 1e-06
+Feature: dwt, Montage: Laplacian, Segment Length: 10, Significance: 0.001
+Feature: dwt, Montage: Laplacian, Segment Length: 10, Significance: 0.0005
+Feature: dwt, Montage: Laplacian, Segment Length: 10, Significance: 0.0001
+New best BAC for dwt: 0.8469251336898396
+Feature: dwt, Montage: Laplacian, Segment Length: 10, Significance: 1e-05
+Feature: dwt, Montage: Laplacian, Segment Length: 10, Significance: 1e-06
+Feature: gcc, Montage: CAR, Segment Length: 1, Significance: 0.001
+No significant features found
+Feature: gcc, Montage: CAR, Segment Length: 1, Significance: 0.0005
+No significant features found
+Feature: gcc, Montage: CAR, Segment Length: 1, Significance: 0.0001
+No significant features found
+Feature: gcc, Montage: CAR, Segment Length: 1, Significance: 1e-05
+No significant features found
+Feature: gcc, Montage: CAR, Segment Length: 1, Significance: 1e-06
+No significant features found
+Feature: gcc, Montage: CAR, Segment Length: 2, Significance: 0.001
+No significant features found
+Feature: gcc, Montage: CAR, Segment Length: 2, Significance: 0.0005
+No significant features found
+Feature: gcc, Montage: CAR, Segment Length: 2, Significance: 0.0001
+No significant features found
+Feature: gcc, Montage: CAR, Segment Length: 2, Significance: 1e-05
