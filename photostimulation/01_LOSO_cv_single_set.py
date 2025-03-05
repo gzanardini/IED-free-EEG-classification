@@ -125,8 +125,6 @@ for run_n in range(N_RUNS):
             '''arr0=feats[train_idxs][y_train==0]
             arr1=feats[train_idxs][y_train==1]
             ps=[mannwhitneyu_test(arr0[:, col], arr1[:, col])[1] for col in range(feats.shape[1])]'''
-
-            ps=[mannwhitneyu_test(feats[train_idxs][y_train==0][:, col], feats[train_idxs][y_train==1][:, col])[1] for col in range(feats.shape[1])]
         
             significant_feats=[col for col, p_val in enumerate(ps) if p_val<significance]
 
