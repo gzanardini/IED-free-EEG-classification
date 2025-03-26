@@ -1,4 +1,5 @@
 import os
+from sklearn.preprocessing import MinMaxScaler
 import wandb.plot
 from xgboost import XGBClassifier
 import numpy as np 
@@ -27,6 +28,15 @@ N_CUDA=2
 SPLIT_RATIO=0.3
 
 Device(N_CUDA).use()
+
+def find_optimal_threshold(y_true, y_prob):
+    """
+    Find the optimal decision threshold based on the maximum geometric mean score.
+    """
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    gmeans = np.sqrt(tpr * (1 - fpr))  # Geometric mean score
+    opt_index = np.argmax(gmeans)  # Find threshold with max geometric mean
+    return thresholds[opt_index]
 
 def calculate_bac(labels, scores, sens_thresh):
     fpr, tpr, thresholds = roc_curve(labels, scores)
@@ -57,7 +67,7 @@ def mannwhitneyu_test(x, y):
 montages=['CAR', 'Cz', 'BipolarDB','Laplacian']
 segment_lengths=[1, 2, 5,10]
 p_values=[1e-3, 5e-4, 1e-4, 1e-5, 1e-6]
-feature_names = ['cc', 'cwt', 'dwt', 'gcc', 'gplv','plv','mst','sst','spectral','utm']
+feature_names = ['cc', 'cwt', 'dwt', 'plv','mst','sst','spectral','utm']
 
 labels=np.load('/space/gzanardini/emc_dataset/labels.npy')
 
@@ -70,7 +80,7 @@ for run_n in range(N_RUNS):
     np.random.seed(seed)
     cp.random.seed(seed)
 
-    wandb.init(project='emc_nested_LOSO' , name=f'AUCweighted_run_{run_n}', reinit=True)
+    wandb.init(project='emc_LOSO_calibrated' , name=f'BACweighted_run_{run_n}', reinit=True)
     wandb.config.seed=seed
 
     print(f'RUN {run_n+1} - Seed: {seed}')
@@ -82,7 +92,7 @@ for run_n in range(N_RUNS):
         test_idx=[ss]
         other_idxs=np.delete(np.arange(len(labels)), test_idx)
 
-        train_idxs, val_idxs = train_test_split(other_idxs, test_size=SPLIT_RATIO, stratify=labels, random_state=seed)
+        train_idxs, val_idxs = train_test_split(other_idxs, test_size=SPLIT_RATIO, stratify=labels[other_idxs], random_state=seed)
 
         y_train=labels[train_idxs]
         y_val=labels[val_idxs]
@@ -98,6 +108,7 @@ for run_n in range(N_RUNS):
             best_val_data = None
             
             for montage, segment_length, significance in itertools.product(montages, segment_lengths, p_values):
+                
                 print(f'Feature: {feature_name}, Montage: {montage}, Segment Length: {segment_length}, Significance: {significance}')
                 data=np.load(f'/space/gzanardini/emc_dataset/{feature_name}_{montage}_{segment_length}s.npy')
                 data=handle_complex_numbers(data)
@@ -121,8 +132,8 @@ for run_n in range(N_RUNS):
                 auc = roc_auc_score(y_val, y_prob)
                 bac80= calculate_bac(y_val, y_prob, 0.8)[0]
                 
-                if auc > best_auc:
-                    print(f'New best BAC for {feature_name}: {bac80}')
+                if bac80 > best_bac80:
+                    print(f'New best BAC80 for {feature_name}: {bac80}')
                     best_auc = auc
                     best_model = model
                     best_val_data = data[val_idxs][:, significant_feats]
@@ -150,16 +161,23 @@ for run_n in range(N_RUNS):
 
         X_train_lr = np.array(X_train_lr).T
         X_test_lr = np.array(X_test_lr).T
+
+        #scale each column  by (x-min)/(max-min) 
+        scaler = MinMaxScaler(clip=True)
+        X_train_lr = scaler.fit_transform(X_train_lr)
+        X_test_lr = scaler.transform(X_test_lr)
+
+        opt_T=[find_optimal_threshold(y_val, X_train_lr[:, col]) for col in range(X_train_lr.shape[1])]
+        print(f'Optimal thresholds: {opt_T}')
         
-        # use the auc of each model as a weight for the ensmbled prections
-        weights=[best_classifiers[feature_name][0] for feature_name in best_classifiers]
-        weights = np.array(weights)
-        weights = weights/np.sum(weights)
-        print(f'Weights: {weights}')
+        #threshold each column with the corresponding threshold
+        y_test_preds = np.where(np.array([X_test_lr[:,i] > opt_T[i] for i in range(X_test_lr.shape[1])]).T,1,0)
 
-        wandb.log({'weights': weights}, step=ss)
+        #threshold the probabilities in each column of X_test_lr using the corresponding optimal threshold
+        print(f'Intermediate predictions for fold {ss}: {y_test_preds}')
 
-        y_test_prob = np.dot(X_test_lr, weights)
+        y_test_prob = np.mean(y_test_preds, axis=1)
+
         y_test_pred = (y_test_prob >= 0.5).astype(int)
 
         print(f'Final predictions for fold {ss}: {y_test_pred}')
@@ -175,11 +193,6 @@ for run_n in range(N_RUNS):
     y_preds_outer=np.array(prediction_summary['y_pred']).astype(int)
     y_true_outer=np.array(prediction_summary['y_true']).astype(int)
     y_probs_outer=np.array(prediction_summary['y_prob']).astype(float)
-
-    # subject_preds = []
-    # for subj in unique_subjects:
-    #     subject_preds.append((subj, y_preds_outer[unique_subjects == subj][0], y_true_outer[unique_subjects == subj][0]))
-    # print(subject_preds)
 
     final_bac = balanced_accuracy_score(y_true_outer, y_preds_outer)
     final_auc = roc_auc_score(y_true_outer, y_probs_outer)
@@ -211,11 +224,11 @@ for run_n in range(N_RUNS):
                 'ROC Curve': roc_line, 
                 'Precision-Recall Curve': pr_line})
 
-    if not os.path.exists('/space/gzanardini/loso_logs_ensemble/'):
-        os.mkdir('/space/gzanardini/loso_logs_ensemble/')
+    if not os.path.exists('/space/gzanardini/emc/'):
+        os.mkdir('/space/gzanardini/emc/')
 
-    run_summary.to_csv(f'/space/gzanardini/loso_logs_ensemble/AUC_weighted_run_{run_n}_seed_{seed}.csv', index=False)    
-    prediction_summary.to_csv(f'/space/gzanardini/loso_logs_ensemble/AUC_weighted_run_{run_n}_predictions_seed_{seed}.csv', index=False)
+    run_summary.to_csv(f'/space/gzanardini/emc/BAC_weighted_run_{run_n}_seed_{seed}.csv', index=False)    
+    prediction_summary.to_csv(f'/space/gzanardini/emc/BAC_weighted_run_{run_n}_predictions_seed_{seed}.csv', index=False)
 
     print('###############################')
     print(f'Final BAC: {final_bac}')

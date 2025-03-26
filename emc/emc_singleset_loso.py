@@ -59,16 +59,23 @@ def mannwhitneyu_test(x, y):
 montages=['CAR', 'Cz', 'BipolarDB','Laplacian']
 segment_lengths=[1, 2, 5,10,20,60]
 p_values=[1e-3, 5e-4, 1e-4, 1e-5, 1e-6]
-feature_names = ['cc', 'cwt', 'dwt', 'gcc', 'gplv','plv','mst','sst','spectral','utm']
+# feature_names = ['cc', 'cwt', 'dwt', 'gcc', 'gplv','plv','mst','sst','spectral','utm']
+feature_names = ['gcc', 'gplv','plv','mst','sst','spectral','utm']
 
 labels=np.load('/space/gzanardini/emc_dataset/labels.npy')
 
 for montage, feature_name, segment_length, significance in itertools.product(montages, feature_names, segment_lengths, p_values):
 
     features=np.load(f'/space/gzanardini/emc_dataset/{feature_name}_{montage}_{segment_length}s.npy')
+
+    print(f'Features shape: {features.shape}')
+
+
     if len(features.shape)>2:
         features=features.reshape(features.shape[0], -1)
     features=handle_complex_numbers(features)
+
+    print(f'Features shape: {features.shape}')
 
     for run_n in range(N_RUNS):    
 
