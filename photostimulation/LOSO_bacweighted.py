@@ -80,7 +80,7 @@ for run_n in range(N_RUNS):
     np.random.seed(seed)
     cp.random.seed(seed)
 
-    wandb.init(project='LOSO_weighted' , name=f'BACweighted_run_{run_n}', reinit=True)
+    wandb.init(project='LOSO_weighted' , name=f'BACweightedv2_run_{run_n}', reinit=True)
     wandb.config.seed=seed
 
     print(f'RUN {run_n+1} - Seed: {seed}')
@@ -179,11 +179,14 @@ for run_n in range(N_RUNS):
         
         # use the bac of each model as a weight for the ensmbled prections
         weights = [best_classifiers[feature_name][5] for feature_name in best_classifiers]
-        weights = np.array(weights)
+        weights = np.array(weights)-0.5
+        weights=np.clip(weights, 0, 1)
         weights = weights/np.sum(weights)
         print(f'Weights: {weights}')
 
-        wandb.log({'weights': weights}, step=ss)
+        weights_table=[[f, w] for (f, w) in zip(best_classifiers.keys(), weights)]
+        weights_table=wandb.Table(data=weights_table, columns=['feature', 'weight'])
+        wandb.log({'weights': weights_table}, step=ss)
 
         y_test_prob = np.dot(X_test_lr, weights)
         y_test_pred = (y_test_prob >= 0.5).astype(int)

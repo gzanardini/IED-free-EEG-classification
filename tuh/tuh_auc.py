@@ -22,10 +22,10 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # Set random seed
 wandb.login(key='96e9a92e52e807ed253b3872afd1de1bafc3640a')
 
-N_RUNS=1
+N_RUNS=10
 N_CUDA=2
 SPLIT_RATIO=0.3
-RUN_NAME='AUCweighted_test'
+RUN_NAME='AUCweighted'
 PROJECT_NAME='tuh_LOSO_calibrated'
 FEAT_FOLDER='/space/gzanardini/tuh_features/'
 
@@ -85,21 +85,19 @@ subject_labels = np.array(subject_labels)
 for run_n in range(N_RUNS):    
     run_summary=pd.DataFrame(columns=['subject', 'montage', 'feature_name', 'segment_length', 'significance', 'significant_feats', 'bac', 'bac80', 'auc'])
     prediction_summary=pd.DataFrame(columns=['subject', 'y_pred', 'y_prob', 'y_true'])
+    subject_summary=pd.DataFrame(columns=['subject', 'y_pred', 'y_prob', 'y_true'])
     
     seed=secrets.randbelow(5000)
     random.seed(seed)
     np.random.seed(seed)
     cp.random.seed(seed)
 
-    wandb.init(project=PROJECT_NAME , name=f'AUCweightedv2_run_{run_n}', reinit=True)
+    wandb.init(project=PROJECT_NAME , name=f'{RUN_NAME}_run_{run_n}', reinit=True)
     wandb.config.seed=seed
 
     print(f'RUN {run_n+1} - Seed: {seed}')
 
     for ss, subject in enumerate(unique_subjects):
-
-        auc_recap = {f'{feature_name}_auc':[] for feature_name in feature_names}
-        bac80_recap = {f'{feature_name}_bac80':[] for feature_name in feature_names}
 
         print(f'Iteration {ss+1} - Subject: {subject}')
         test_idxs = np.where(description['subject'] == subject)
@@ -167,8 +165,6 @@ for run_n in range(N_RUNS):
                     test_data=data[test_idxs][:, significant_feats]
                     best_bac80 = bac80
                     best_classifiers[feature_name] = (best_auc, best_model, best_val_data, significant_feats, test_data, best_bac80)    
-
-                         
                 # Add data to run_summary DataFrame
                 newline=pd.DataFrame({'subject': subject, 'montage': montage, 'feature_name': feature_name, 'segment_length': segment_length, 'significance': significance, 'significant_feats': len(significant_feats), 'bac': None, 'bac80': None, 'auc': auc}, index=[0])           
                 run_summary = pd.concat([run_summary, newline], ignore_index=True)
@@ -215,7 +211,20 @@ for run_n in range(N_RUNS):
         print(f'Ground truths for {subject}: {y_test}')
 
         prediction_summary = pd.concat([prediction_summary, pd.DataFrame({'subject': subject, 'y_pred': y_test_preds, 'y_prob': y_test_prob, 'y_true': y_test})], ignore_index=True)
-        
+
+        # compute some subject_based metrics
+        subj_label=int(labels[subjects == subject][0])
+        y_test_prob_subj = np.mean(y_test_preds, axis=0)
+        y_test_preds_subj = np.where(y_test_prob_subj > 0.5, 1, 0)
+
+        print('###################################')
+        print(f'SUBJECT AGGREGATED PREDICTIONS')
+        print(f'Final predictions for {subject}: {y_test_preds_subj}')
+        print(f'Final probabilities for {subject}: {y_test_prob_subj}')
+        print(f'Ground truths for {subject}: {subj_label}')
+
+        subject_summary = pd.concat([subject_summary, pd.DataFrame({'subject': [subject], 'y_pred': [y_test_preds_subj], 'y_prob': [y_test_prob_subj], 'y_true': [subj_label]})], ignore_index=True)
+
     print(prediction_summary['y_pred'])
     print(prediction_summary['y_true'])
     print(prediction_summary['y_prob'])
@@ -254,15 +263,6 @@ for run_n in range(N_RUNS):
                 'ROC Curve': roc_line, 
                 'Precision-Recall Curve': pr_line})
 
-    if not os.path.exists('/space/gzanardini/tuh_logs/'):
-        os.mkdir('/space/gzanardini/tuh_logs/')
-
-    if not os.path.exists(f'/space/gzanardini/tuh_logs/{PROJECT_NAME}/'):
-        os.mkdir(f'/space/gzanardini/tuh_logs/{PROJECT_NAME}/')
-
-    run_summary.to_csv(f'/space/gzanardini/tuh_logs/{PROJECT_NAME}/{RUN_NAME}_{run_n}_seed_{seed}.csv', index=False)    
-    prediction_summary.to_csv(f'/space/gzanardini/{PROJECT_NAME}/{RUN_NAME}_{run_n}_predictions_seed_{seed}.csv', index=False)
-
     print('###############################')
     print(f'Final BAC: {final_bac}')
     print(f'Final AUC: {final_auc}')
@@ -272,6 +272,45 @@ for run_n in range(N_RUNS):
     print(f'Final Recall: {final_recall}')
     print(f'Final F1: {final_f1}')
     print('###############################')
-    print('DONE')
+
+    subj_y_preds = np.array(subject_summary['y_pred']).astype(int)
+    subj_y_true = np.array(subject_summary['y_true']).astype(int)
+    subj_y_probs = np.array(subject_summary['y_prob']).astype(float)
+    subj_final_bac = balanced_accuracy_score(subj_y_true, subj_y_preds)
+    subj_final_auc = roc_auc_score(subj_y_true, subj_y_probs)
+    subj_final_accuracy = accuracy_score(subj_y_true, subj_y_preds)
+    subj_final_bac80, fpr, tpr, thresholds = calculate_bac(subj_y_true, subj_y_probs, 0.8)
+    subj_final_precision = precision_score(subj_y_true, subj_y_preds)
+    subj_final_recall = recall_score(subj_y_true, subj_y_preds)
+    subj_final_f1 = f1_score(subj_y_true, subj_y_preds)
+
+    subj_cm= wandb.plot.confusion_matrix(y_true=subj_y_true, preds=subj_y_preds, class_names=['healthy', 'epileptic'])
+    subj_data_roc = [[f, t] for (f, t) in zip(fpr, tpr)]
+    subj_table_roc = wandb.Table(data=subj_data_roc, columns=["fpr", "tpr"])
+    subj_roc_line=wandb.plot.line(subj_table_roc, "fpr", "tpr", title="ROC Curve")
+    subj_p , subj_r , t = precision_recall_curve(subj_y_true, subj_y_probs)
+    subj_data_pr = [[f, t] for (f, t) in zip(subj_p, subj_r)]
+    subj_table_pr = wandb.Table(data=subj_data_pr, columns=["precision", "recall"])
+    subj_pr_line=wandb.plot.line(subj_table_pr, "precision", "recall", title="Precision-Recall Curve")
+    wandb.log({'Subject Metrics/BAC': subj_final_bac,
+                'Subject Metrics/AUC': subj_final_auc,
+                'Subject Metrics/Accuracy': subj_final_accuracy, 
+                'Subject Metrics/BAC80': subj_final_bac80, 
+                'Subject Metrics/Precision': subj_final_precision, 
+                'Subject Metrics/Recall': subj_final_recall,  
+                'Subject Metrics/F1': subj_final_f1, 
+                'Subject Metrics/Confusion Matrix': subj_cm, 
+                'Subject Metrics/ROC Curve': subj_roc_line, 
+                'Subject Metrics/Precision-Recall Curve': subj_pr_line})
+
+    if not os.path.exists('/space/gzanardini/tuh_logs/'):
+        os.mkdir('/space/gzanardini/tuh_logs/')
+
+    if not os.path.exists(f'/space/gzanardini/tuh_logs/{PROJECT_NAME}/'):
+        os.mkdir(f'/space/gzanardini/tuh_logs/{PROJECT_NAME}/')
+
+    run_summary.to_csv(f'/space/gzanardini/tuh_logs/{PROJECT_NAME}/{RUN_NAME}_{run_n}_seed_{seed}.csv', index=False)    
+    prediction_summary.to_csv(f'/space/gzanardini/tuh_logs/{PROJECT_NAME}/{RUN_NAME}_{run_n}_predictions_seed_{seed}.csv', index=False)
+    subject_summary.to_csv(f'/space/gzanardini/tuh_logs/{PROJECT_NAME}/{RUN_NAME}_{run_n}_subject_predictions_seed_{seed}.csv', index=False)
 
     wandb.finish()

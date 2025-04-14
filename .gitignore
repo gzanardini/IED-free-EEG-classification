@@ -10,6 +10,8 @@ wandb/*
 *.npz
 *.csv
 *.pkl
+*.out
+*.log
 *.pyc
 *wandb/*
 */wandb/*
