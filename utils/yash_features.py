@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
-from scipy.stats import kurtosis, skew
+from scipy.stats import kurtosis, skew, entropy
 from scipy.signal import correlate, butter, lfilter, find_peaks, filtfilt, hilbert
 from tqdm.contrib.concurrent import process_map
 import pywt
@@ -1495,63 +1495,6 @@ def cal_freqweighted_energy(x, Fs, method, wlength_ma=None, bandpass_filter_para
     
     return x_nleo
 
-def wentropy(x,entType,addiontalParameter = None):
-
-    if entType == 'shannon':
-
-        x = np.power(x[ x != 0 ],2)
-
-        return - np.sum(np.multiply(x,np.log(x)))
-
-    elif entType == 'threshold':
-
-        if addiontalParameter is None or isinstance(addiontalParameter,str):
-
-            return None
-
-        x = np.absolute(x)
-
-        return np.sum((x > addiontalParameter))
-
-    elif entType == 'norm':
-
-        if addiontalParameter is None or isinstance(addiontalParameter,str) or addiontalParameter < 1:
-
-            return None
-
-        x = np.absolute(x)
-
-        return np.sum(np.power(x,addiontalParameter))
-
-    elif entType == 'sure':
-
-        if addiontalParameter is None or isinstance(addiontalParameter,str):
-
-            return None
-
-        N = len(x)
-
-        x2 = np.square(x)
-
-        t2 = addiontalParameter**2
-
-        xgt = np.sum((x2 > t2))
-
-        xlt = N - xgt
-
-
-        return N - (2*xlt) + (t2 *xgt) + np.sum(np.multiply(x2,(x2 <= t2)))
-
-    elif entType == 'logenergy':
-
-        x = np.square(x[x != 0])
-
-        return np.sum(np.log(x))
-
-    else:
-        print("invalid entropy type")
-        return None
-
 def run_UTM_whole(data, Fs, MONTAGE):
     data_montage = apply_montage(data, MONTAGE)
     y = []  # To store features
@@ -1571,12 +1514,12 @@ def run_UTM_whole(data, Fs, MONTAGE):
         pow = np.log(np.sum(F * np.conj(F)))
         signal_energy_fdomain = safe_log(np.sum(signal.square(np.abs(data_j))))
         # Implement or find Python equivalents for entropy functions
-        signal_ShEn = wentropy(data_j, entType = 'shannon')
+        j_pdf = np.histogram(data_j, bins=1024, density=True)[0]
+        signal_ShEn = entropy(j_pdf, base=2)
         Vpp = np.ptp(data_j)
         # Peak detection
         pks, locs = find_peaks(data_j, height=50, distance=round(Fs/50))
         signal_npks = len(pks)
-
         # Plot the original signal
         y_j = [signal_mean, signal_median, signal_std, signal_skewness, signal_kurtosis,
                 signal_zcd, signal_nleo_env_diff, signal_nleo_teager,
@@ -1620,7 +1563,8 @@ def run_UTM_seg(data, Fs, MONTAGE, sec):
                 pow = np.log(np.sum(F * np.conj(F)))
                 signal_energy_fdomain = safe_log(np.sum(signal.square(np.abs(data_j))))
                 # Implement or find Python equivalents for entropy functions
-                signal_ShEn = wentropy(data_j, entType = 'shannon')
+                j_pdf = np.histogram(data_j, bins=1024, density=True)[0]
+                signal_ShEn = entropy(j_pdf, base=2)
                 Vpp = np.ptp(data_j)
                 # Peak detection
                 pks, locs = find_peaks(data_j, height=50, distance=round(Fs/50))
