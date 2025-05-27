@@ -15,4 +15,4 @@ wandb/*
 *.pyc
 *wandb/*
 */wandb/*
-*.norsebebackup
+*.norsbebackup
