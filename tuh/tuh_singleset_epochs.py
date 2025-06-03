@@ -17,7 +17,6 @@ wandb.login(key='96e9a92e52e807ed253b3872afd1de1bafc3640a')
 
 N_RUNS=3
 N_CUDA=2
-SPLIT_RATIO=0.3
 PROJECT_NAME='tuh_LOSO_single_set'
 FEAT_FOLDER='/space/gzanardini/tuh_features/'
 
@@ -94,10 +93,15 @@ for montage, feature_name, segment_length in itertools.product(montages, feature
         wandb.config.montage=montage
         wandb.config.feature_name=feature_name
         wandb.config.segment_length=segment_length
+        wandb.config.subject_metrics=True
         
         y_preds=[]
         y_scores=[]
         y_tests=[]
+
+        y_preds_subject=[]
+        y_scores_subject=[]
+        y_trues_subject=[]
 
         ctr=0
 
@@ -125,18 +129,39 @@ for montage, feature_name, segment_length in itertools.product(montages, feature
             y_pred=model.predict(cp.array(features[test_idxs]))
             y_score=model.predict_proba(cp.array(features[test_idxs]))[:,1]
 
+            y_score_subject=np.mean(y_pred)
+            y_pred_subject=np.where(y_score_subject >= 0.5, 1, 0)
+            y_true_subject=int(labels[subjects == subject][0])
+
+
+            print('###################################')
+            print(f'Final predictions for {subject}: {y_pred}')
+            print(f'Final probabilities for {subject}: {y_score}')
+            print(f'Ground truths for {subject}: {y_test}')  
+            print('###################################')
+            print(f'SUBJECT AGGREGATED PREDICTIONS')
+            print(f'Final predictions for {subject}: {y_pred_subject}')
+            print(f'Final probabilities for {subject}: {y_score_subject}')
+            print(f'Ground truths for {subject}: {y_true_subject}')
+            print('###################################')
+
+
             y_preds.extend(y_pred)
             y_scores.extend(y_score)
             y_tests.extend(y_test)
+
+
+            y_preds_subject.append(y_pred_subject)
+            y_scores_subject.append(y_score_subject)
+            y_trues_subject.append(y_true_subject)
+
+
 
         y_preds=np.array(y_preds).flatten()
         y_scores=np.array(y_scores).flatten()
         y_tests=np.array(y_tests).flatten()
 
-        print(f'Y_preds shape: {y_preds.shape}')
-        print(f'Y_scores shape: {y_scores.shape}')
-        print(f'Y_tests shape: {y_tests.shape}')
-               
+             
         bac=balanced_accuracy_score(y_tests, y_preds)
         bac80, fpr, tpr, thresholds = calculate_bac(y_tests, y_scores, 0.8)
         auc=roc_auc_score(y_tests, y_scores)
@@ -167,4 +192,37 @@ for montage, feature_name, segment_length in itertools.product(montages, feature
                      'Precision-Recall Curve': pr_line,
                      'Accuracy': accuracy})
         
+
+        # Subject-level metrics
+        y_preds_subject = np.array(y_preds_subject).flatten()
+        y_scores_subject = np.array(y_scores_subject).flatten()
+        y_trues_subject = np.array(y_trues_subject).flatten()
+        bac_subject = balanced_accuracy_score(y_trues_subject, y_preds_subject)
+        bac80_subject, fpr_subject, tpr_subject, thresholds_subject = calculate_bac(y_trues_subject, y_scores_subject, 0.8)
+        auc_subject = roc_auc_score(y_trues_subject, y_scores_subject)
+        recall_subject = recall_score(y_trues_subject, y_preds_subject)
+        precision_subject = precision_score(y_trues_subject, y_preds_subject)
+        f1_subject = f1_score(y_trues_subject, y_preds_subject)
+        accuracy_subject = accuracy_score(y_trues_subject, y_preds_subject)
+
+        c_m_subject = wandb.plot.confusion_matrix(y_true=y_trues_subject, preds=y_preds_subject, class_names=['healthy', 'epileptic'])
+        data_roc_subject = [[f, t] for (f, t) in zip(fpr_subject, tpr_subject)]
+        table_roc_subject = wandb.Table(data=data_roc_subject, columns=["fpr", "tpr"])
+        roc_line_subject = wandb.plot.line(table_roc_subject, "fpr", "tpr", title="ROC Curve Subject-Level")
+        p_subject, r_subject, t_subject = precision_recall_curve(y_trues_subject, y_scores_subject)
+        data_pr_subject = [[f, t] for (f, t) in zip(p_subject, r_subject)]
+        table_pr_subject = wandb.Table(data=data_pr_subject, columns=["precision", "recall"])
+        pr_line_subject = wandb.plot.line(table_pr_subject, "precision", "recall", title="Precision-Recall Curve Subject-Level")
+
+        wandb.log({'Subjects/BAC': bac_subject,
+                        'Subjects/BAC80': bac80_subject,
+                        'Subjects/AUC': auc_subject,
+                        'Subjects/Recall': recall_subject,
+                        'Subjects/Precision': precision_subject,
+                        'Subjects/F1': f1_subject,
+                        'Subjects/Confusion Matrix': c_m_subject,
+                        'Subjects/ROC Curve': roc_line_subject,
+                        'Subjects/Precision-Recall Curve': pr_line_subject,
+                        'Subjects/Accuracy': accuracy_subject})
+
         wandb.finish() 

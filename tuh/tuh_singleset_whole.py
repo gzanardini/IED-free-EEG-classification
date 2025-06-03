@@ -6,10 +6,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score
 import itertools 
 import secrets
-from scipy.stats import mannwhitneyu
 import os
-from sklearn.model_selection import train_test_split
-#warnings.simplefilter(action='ignore', category=FutureWarning)
 import cupy as cp
 from cupy.cuda import Device
 
@@ -17,7 +14,6 @@ wandb.login(key='96e9a92e52e807ed253b3872afd1de1bafc3640a')
 
 N_RUNS=3
 N_CUDA=0
-SPLIT_RATIO=0.3
 PROJECT_NAME='tuh_LOSO_single_set_whole'
 FEAT_FOLDER='/space/gzanardini/tuh_features_whole/'
 
@@ -71,7 +67,7 @@ subject_labels = np.array(subject_labels)
 
 for montage, feature_name, segment_length in itertools.product(montages, feature_names, segment_lengths):
 
-    features=np.load(f'{FEAT_FOLDER}{feature_name}_{montage}_s{segment_length}s.npy')
+    features=np.load(f'{FEAT_FOLDER}{feature_name}_{montage}_{segment_length}s.npy')
     print(f'Loading {feature_name} features for montage {montage} and segment length {segment_length}')
     
     print(f'Features shape: {features.shape}')
