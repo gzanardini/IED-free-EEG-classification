@@ -12,16 +12,18 @@ from sklearn.preprocessing import StandardScaler
 
 # Configuration
 N_RUNS = 5
-N_CUDA = 1
+N_CUDA = 2
 N_JOBS_XGB= 1  # Set to 1 for single GPU usage
-DATA_FOLDER = '/space/gzanardini/emc_v2/'
+
+DATA_FOLDER = '/space/gzanardini/emc_epoched/split/'
 LOG_FOLDER = '/space/gzanardini/emc/'
-PROJECT_NAME = 'emc_singleset_NOMWU'
+PROJECT_NAME = 'emc_singleset_final'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 segment_lengths = [1, 2, 5, 10]
 feature_names = ['cc', 'cwt', 'dwt', 'gcc', 'gplv', 'plv', 'mst', 'sst', 'spectral', 'utm']
+combiners=['mean', 'median', 'std', 'skew', 'kurt']
 
 def setup_environment():
     """Initialize CUDA and wandb."""
@@ -76,16 +78,10 @@ def load_data():
     
     return description, labels, subjects, unique_subjects, subject_labels
 
-def load_feature_data(feature_name, montage, segment_length):
+def load_feature_data(feature_name, montage, segment_length, combiner):
     """Load and preprocess feature data."""
-    features = np.load(f'{DATA_FOLDER}{feature_name}_{montage}_{segment_length}s.npy')
-    
-    print(f'Features shape: {features.shape}')
-    if len(features.shape) > 2:
-        features = features.reshape(features.shape[0], -1)
+    features = np.load(f'{DATA_FOLDER}{feature_name}_{montage}_{segment_length}s_{combiner}.npy')
     features = handle_complex_numbers(features)
-    print(f'Processed features shape: {features.shape}')
-    
     return features
 
 def log_metrics(y_tests, y_preds, y_scores, prefix=""):
@@ -126,7 +122,7 @@ def log_metrics(y_tests, y_preds, y_scores, prefix=""):
     
     return bac, bac80, auc, score, recall, precision, f1, accuracy
 
-def save_predictions(y_tests, y_preds, y_scores, montage, feature_name, segment_length, run_n, seed, subjects=False):
+def save_predictions(y_tests, y_preds, y_scores, montage, feature_name, segment_length,  combiner,run_n, seed, subjects=False):
     """Save predictions to CSV file."""
     # Create output directory if it doesn't exist
     output_dir = f'{LOG_FOLDER}{PROJECT_NAME}/'
@@ -139,7 +135,7 @@ def save_predictions(y_tests, y_preds, y_scores, montage, feature_name, segment_
         'y_prob': y_scores
     })
         # Save to CSV
-    filename = f'{output_dir}{feature_name}_{montage}_{segment_length}s_run_{run_n}_seed_{seed}.csv'
+    filename = f'{output_dir}{feature_name}_{montage}_{segment_length}s_{combiner}_run_{run_n}_seed_{seed}.csv'
     predictions_df.to_csv(filename, index=False)
     print(f"Predictions saved to {filename}")
     if subjects:
@@ -151,15 +147,15 @@ def main():
     setup_environment()
     description, labels, subjects, unique_subjects, subject_labels=load_data()    
 
-    for montage, feature_name, segment_length in itertools.product(montages, feature_names, segment_lengths):
-        features = load_feature_data(feature_name, montage, segment_length)
+    for montage, feature_name, segment_length, combiner in itertools.product(montages, feature_names, segment_lengths, combiners):
+        features = load_feature_data(feature_name, montage, segment_length, combiner)
         
         for run_n in range(N_RUNS):
-            print(f'Run {run_n} - {montage} - {feature_name} - {segment_length}s -')
+            print(f'Run {run_n} - {montage} - {feature_name} - {segment_length}s - {combiner}')
             
             wandb.init(
                 project=PROJECT_NAME,
-                name=f'{feature_name}_{montage}_{segment_length}s_run_{run_n}',
+                name=f'{feature_name}_{montage}_{segment_length}s_{combiner}run_{run_n}',
                 reinit=True
             )
             
@@ -172,6 +168,7 @@ def main():
                 'montage': montage,
                 'feature_name': feature_name,
                 'segment_length': segment_length,
+                'combiner': combiner,
                 'epochs': True
             })
             
@@ -197,7 +194,7 @@ def main():
                     n_estimators=100,
                     max_depth=6, 
                     device=f'cuda:{N_CUDA}',
-                    seed=secrets.randbelow(5000),
+                    seed=seed,
                     subsample=0.9,
                     scale_pos_weight=ratio,
                     n_jobs=4,
@@ -234,8 +231,8 @@ def main():
             subject_metrics = log_metrics(y_tests_subject, y_pred_subject, y_prob_subject, prefix='')
             
             # Save predictions to CSV
-            save_predictions(y_tests, y_preds, y_scores, montage, feature_name, segment_length, run_n, seed)
-            save_predictions(y_tests_subject, y_pred_subject, y_prob_subject, montage, feature_name, segment_length, run_n, seed, subjects=True)
+            save_predictions(y_tests, y_preds, y_scores, montage, feature_name, segment_length,combiner, run_n, seed)
+            save_predictions(y_tests_subject, y_pred_subject, y_prob_subject, montage, feature_name, segment_length, combiner,run_n, seed, subjects=True)
             
             # Print summary
             print('###############################')

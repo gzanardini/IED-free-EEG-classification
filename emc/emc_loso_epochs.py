@@ -22,15 +22,16 @@ N_RUNS = 10
 N_CUDA = 0
 SPLIT_RATIO = 0.3
 RUN_NAME = 'epochs'
-PROJECT_NAME = 'emc_LOSO_nomwu'
-FEAT_FOLDER = '/space/gzanardini/emc_v2/'
+PROJECT_NAME = 'emc_LOSO_final'
+FEAT_FOLDER = '/space/gzanardini/emc_epoched/split'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
-NUM_WORKERS=8
+NUM_WORKERS=16
 N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 segment_lengths = [1, 2, 5, 10]
 feature_names = ['cc', 'cwt', 'dwt', 'gcc', 'gplv', 'plv', 'mst', 'sst', 'spectral', 'utm']
+combiners = ['mean', 'median', 'std','skew', 'kurt']
 
 def setup_environment():
     """Initialize CUDA and wandb."""
@@ -83,9 +84,9 @@ def load_data():
     
     return description, labels, subjects, unique_subjects, subject_labels
 
-def load_feature_data(feature_name, montage, segment_length):
+def load_feature_data(feature_name, montage, segment_length, combiner):
     """Load and preprocess feature data."""
-    data = np.load(f'{FEAT_FOLDER}{feature_name}_{montage}_{segment_length}s.npy')
+    data = np.load(f'{FEAT_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy')
     data = handle_complex_numbers(data)
     
     if len(data.shape) > 2:
@@ -113,12 +114,13 @@ def get_train_val_test_indices(description, labels, subject, seed):
     
     return train_idxs, val_idxs, test_idxs
 
-def train_single_classifier(feature_name, montage, segment_length, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
+def train_single_classifier(feature_name, montage, segment_length, combiner, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
     """Train a single XGBoost classifier.
         Returns:
         - feature_name: Name of the feature used
         - montage: Montage used
         - segment_length: Length of the segments used
+        - combiner: Combiner used
         - auc: Area Under the ROC Curve
         - bac80: Balanced Accuracy at 80% sensitivity
         - score: Combined score (AUC + BAC80)
@@ -126,9 +128,9 @@ def train_single_classifier(feature_name, montage, segment_length, train_idxs, v
         - val_data: Validation data used for predictions
         - test_data: Test data used for predictions
     """
-    print(f'Feature: {feature_name}, Montage: {montage}, Segment Length: {segment_length}')
+    print(f'Feature: {feature_name}, Montage: {montage}, Segment Length: {segment_length}, Combiner: {combiner}')
     
-    data = load_feature_data(feature_name, montage, segment_length)
+    data = load_feature_data(feature_name, montage, segment_length, combiner)
     ratio = (len(y_train) - sum(y_train)) / sum(y_train)
     
     model = XGBClassifier(
@@ -149,38 +151,39 @@ def train_single_classifier(feature_name, montage, segment_length, train_idxs, v
     bac80 = calculate_bac(y_val, y_prob, 0.8)[0]
     score = auc + bac80  # Calculate combined score
     
-    return feature_name, montage, segment_length, auc, bac80, score, model, data[val_idxs], data[test_idxs]
+    return feature_name, montage, segment_length, combiner, auc, bac80, score, model, data[val_idxs], data[test_idxs]
 
 def train_feature_classifiers(train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
-    """Train classifiers for all feature/montage/segment combinations."""
+    """Train classifiers for all feature/montage/segment/combiner combinations."""
     best_classifiers = {feature: None for feature in feature_names}
     run_results = []
     
     for feature_name in feature_names:
         with ThreadPoolExecutor(max_workers=NUM_WORKERS, thread_name_prefix='xgb_multi') as executor:
             futures = []
-            for montage, segment_length in itertools.product(montages, segment_lengths):
+            for montage, segment_length, combiner in itertools.product(montages, segment_lengths, combiners):
                 futures.append(executor.submit(
-                    train_single_classifier, feature_name, montage, segment_length,
+                    train_single_classifier, feature_name, montage, segment_length, combiner,
                     train_idxs, val_idxs, test_idxs, y_train, y_val, seed
                 ))
             
             for future in futures:
                 result = future.result()
                 if result is not None:
-                    feature_name, montage, segment_length, auc, bac80, score, model, val_data, test_data = result
+                    feature_name, montage, segment_length, combiner, auc, bac80, score, model, val_data, test_data = result
                     
                     if best_classifiers[feature_name] is None or score > best_classifiers[feature_name][5]:
                         print(f'New best score (AUC+BAC80) for {feature_name}: {score:.4f}')
-                        best_classifiers[feature_name] = (auc, model, val_data, test_data, bac80, score)
+                        best_classifiers[feature_name] = (auc, model, val_data, test_data, bac80, score, combiner, montage, segment_length)
                     
                     run_results.append({
                         'feature_name': feature_name,
                         'montage': montage,
                         'segment_length': segment_length,
+                        'combiner': combiner,
                         'auc': auc,
                         'bac80': bac80,
-                        'score': score  # Add score to results
+                        'score': score
                     })
     
     return best_classifiers, run_results
@@ -271,7 +274,7 @@ def save_results(run_summary, prediction_summary, subject_summary, run_n, seed):
 
 def run_loso_cv(description, labels, subjects, unique_subjects, seed):
     """Run Leave-One-Subject-Out cross-validation."""
-    run_summary = pd.DataFrame(columns=['subject', 'montage', 'feature_name', 'segment_length', 'bac', 'bac80', 'auc', 'score'])
+    run_summary = pd.DataFrame(columns=['subject', 'montage', 'feature_name', 'segment_length', 'combiner', 'bac', 'bac80', 'auc', 'score'])
     prediction_summary = pd.DataFrame(columns=['subject', 'y_pred', 'y_prob', 'y_true'])
     subject_summary = pd.DataFrame(columns=['subject', 'y_pred', 'y_prob', 'y_true'])
     
@@ -292,7 +295,10 @@ def run_loso_cv(description, labels, subjects, unique_subjects, seed):
                 wandb.log({
                     f'aucs/{feature_name}': best_classifiers[feature_name][0],
                     f'bac80/{feature_name}': best_classifiers[feature_name][4],
-                    f'score/{feature_name}': best_classifiers[feature_name][5]  # Log score
+                    f'score/{feature_name}': best_classifiers[feature_name][5],
+                    f'best_combiner/{feature_name}': best_classifiers[feature_name][6],
+                    f'best_montage/{feature_name}': best_classifiers[feature_name][7],
+                    f'best_segment_length/{feature_name}': best_classifiers[feature_name][8]
                 }, step=ss)
         
         # Add results to summary
@@ -354,7 +360,7 @@ def main():
         y_true = np.array(prediction_summary['y_true']).astype(int)
         y_probs = np.array(prediction_summary['y_prob']).astype(float)
         
-        log_metrics(y_true, y_preds, y_probs, prefix="Overall Metrics/")
+        log_metrics(y_true, y_preds, y_probs, prefix="Sample/")
         
         # Subject-level evaluation
         subj_y_preds = np.array(subject_summary['y_pred']).astype(int)

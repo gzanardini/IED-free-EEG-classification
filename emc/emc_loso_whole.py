@@ -7,7 +7,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score
 import itertools 
 import secrets
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 import warnings
 import cupy as cp
 from cupy.cuda import Device
@@ -21,10 +21,10 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 N_RUNS = 10
 N_CUDA = 0
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'emc_LOSO_nomwu'
+PROJECT_NAME = 'emc_nested'
 RUN_NAME = 'whole'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
-DATA_FOLDER = '/space/gzanardini/emc_dataset/'
+DATA_FOLDER = '/space/gzanardini/emc_whole/split'
 LOG_FOLDER = '/space/gzanardini/emc/'
 N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
 NUM_WORKERS = 16  # Number of parallel workers for training
@@ -32,6 +32,7 @@ NUM_WORKERS = 16  # Number of parallel workers for training
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 segment_lengths = [1, 2, 5, 10, 20, 60]
 feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gcc', 'gplv']
+combiners = ['mean', 'median', 'std', 'skew', 'kurt']
 
 def setup_environment():
     """Initialize CUDA and wandb."""
@@ -70,34 +71,57 @@ def handle_complex_numbers(features):
     return features
 
 def load_data():
-    """Load the labels data."""
-    return np.load(f'{DATA_FOLDER}labels.npy')
+    """Load and prepare the dataset."""
+    description = pd.read_csv(f'{DATA_FOLDER}/description.csv')
+    labels = description['epilepsy'].to_numpy()
+    subjects = description['subject'].to_numpy()
+    unique_subjects = np.unique(description['subject'])
+    
+    subject_labels = []
+    for subj in unique_subjects:
+        lbl = labels[subjects == subj][0]
+        subject_labels.append([subj, lbl])
+    subject_labels = np.array(subject_labels)
+    
+    return description, labels, subjects, unique_subjects, subject_labels
 
-def load_feature_data(feature_name, montage, segment_length):
+def load_feature_data(feature_name, montage, segment_length, combiner):
     """Load and preprocess feature data."""
-    data = np.load(f'{DATA_FOLDER}{feature_name}_{montage}_{segment_length}s.npy')
+    data = np.load(f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy')
     data = handle_complex_numbers(data)
     
     if len(data.shape) > 2:
         data = data.reshape(data.shape[0], -1)
     return cp.array(data)
 
-def get_train_val_test_indices(labels, test_idx, seed):
-    """Get indices for train/validation/test splits for LOSO CV."""
-    other_idxs = np.delete(np.arange(len(labels)), test_idx)
-    train_idxs, val_idxs = train_test_split(
-        other_idxs, 
-        test_size=SPLIT_RATIO, 
-        stratify=labels[other_idxs], 
-        random_state=seed
-    )
-    return train_idxs, val_idxs
-
-def train_single_classifier(feature_name, montage, segment_length, train_idxs, val_idxs, y_train, y_val, seed):
-    """Train a single XGBoost classifier."""
-    print(f'Feature: {feature_name}, Montage: {montage}, Segment Length: {segment_length}')
+def get_train_val_test_indices_kfold(description, labels, subject, seed, n_folds=5):
+    """Get indices for train/validation/test splits for LOSO CV using StratifiedKFold."""
+    test_idxs = np.where(description['subject'] == subject)[0]
+    subjects = description['subject']
+    unique_subjects = np.unique(subjects)
+    other_subjects = [subj for subj in unique_subjects if subj != subject]
+    other_subjects_labels = np.array([labels[subjects == subj][0] for subj in other_subjects])
     
-    data = load_feature_data(feature_name, montage, segment_length)
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    fold_splits = list(skf.split(other_subjects, other_subjects_labels))
+    
+    fold_data = []
+    for fold_idx, (train_fold_idxs, val_fold_idxs) in enumerate(fold_splits):
+        train_subjects = [other_subjects[i] for i in train_fold_idxs]
+        val_subjects = [other_subjects[i] for i in val_fold_idxs]
+        
+        train_idxs = np.where(np.isin(description['subject'], train_subjects))[0]
+        val_idxs = np.where(np.isin(description['subject'], val_subjects))[0]
+        
+        fold_data.append((train_idxs, val_idxs))
+    
+    return fold_data, test_idxs
+
+def train_single_classifier(feature_name, montage, segment_length, combiner, train_idxs, val_idxs, y_train, y_val, seed):
+    """Train a single XGBoost classifier."""
+    print(f'Feature: {feature_name}, Montage: {montage}, Segment Length: {segment_length}, Combiner: {combiner}')
+    
+    data = load_feature_data(feature_name, montage, segment_length, combiner)
     ratio = (len(y_train) - sum(y_train)) / sum(y_train)
     
     model = XGBClassifier(
@@ -119,10 +143,10 @@ def train_single_classifier(feature_name, montage, segment_length, train_idxs, v
     bac80, fpr, tpr, thresholds = calculate_bac(y_val, y_prob, 0.8)
     score = auc + bac
     
-    return auc, bac80, score, model, data
+    return auc, bac80, score, model, data, montage, segment_length, combiner
 
 def train_best_classifiers(train_idxs, val_idxs, test_idx, y_train, y_val, seed):
-    """Train classifiers for all feature/montage/segment combinations and keep the best."""
+    """Train classifiers for all feature/montage/segment/combiner combinations and keep the best."""
     best_classifiers = {}
     run_results = []
     
@@ -132,19 +156,29 @@ def train_best_classifiers(train_idxs, val_idxs, test_idx, y_train, y_val, seed)
         
         with ThreadPoolExecutor(max_workers=NUM_WORKERS, thread_name_prefix='xgb_train') as executor:
             futures = []
-            for montage, segment_length in itertools.product(montages, segment_lengths):
+            for montage, segment_length, combiner in itertools.product(montages, segment_lengths, combiners):
                 futures.append(executor.submit(
-                    train_single_classifier, feature_name, montage, segment_length,
+                    train_single_classifier, feature_name, montage, segment_length, combiner,
                     train_idxs, val_idxs, y_train, y_val, seed
                 ))
             
             for future in futures:
-                auc, bac80, score, model, data = future.result()
+                auc, bac80, score, model, data, montage, segment_length, combiner = future.result()
+                
+                run_results.append({
+                    'feature_name': feature_name,
+                    'montage': montage,
+                    'segment_length': segment_length,
+                    'combiner': combiner,
+                    'auc': auc,
+                    'bac80': bac80,
+                    'score': score
+                })
                 
                 if score > best_score:
                     print(f'New best score (AUC+BAC80) for {feature_name}: {score:.4f}')
                     best_score = score
-                    best_classifier_data = (auc, model, data[val_idxs], data[test_idx], bac80, score)
+                    best_classifier_data = (auc, model, data[val_idxs], data[test_idx], bac80, score, montage, segment_length, combiner)
         
         if best_classifier_data is not None:
             best_classifiers[feature_name] = best_classifier_data
@@ -157,7 +191,7 @@ def make_ensemble_predictions(best_classifiers, y_val):
     X_test_lr = []
     
     for feature_name in best_classifiers:
-        auc, model, val_data, test_data, bac80, score = best_classifiers[feature_name]
+        auc, model, val_data, test_data, bac80, score, montage, segment_length, combiner = best_classifiers[feature_name]
         
         val_prob = model.predict_proba(val_data)[:, 1]
         test_prob = model.predict_proba(test_data)[:, 1]
@@ -232,59 +266,83 @@ def save_results(run_summary, prediction_summary, run_n, seed):
     run_summary.to_csv(f'{LOG_FOLDER}{RUN_NAME}_run_{run_n}_seed_{seed}.csv', index=False)
     prediction_summary.to_csv(f'{LOG_FOLDER}{RUN_NAME}_run_{run_n}_predictions_seed_{seed}.csv', index=False)
 
-def run_loso_cv(labels, seed):
-    """Run Leave-One-Subject-Out cross-validation."""
-    run_summary = pd.DataFrame(columns=['montage', 'feature_name', 'segment_length', 'bac', 'bac80', 'auc'])
-    prediction_summary = pd.DataFrame(columns=['subject', 'y_pred', 'y_prob', 'y_true'])
+def run_loso_cv(description, labels, subjects, unique_subjects, seed):
+    """Run Leave-One-Subject-Out cross-validation with 5-fold validation."""
+    run_summary = pd.DataFrame(columns=['subject', 'fold', 'montage', 'feature_name', 'segment_length', 'combiner', 'bac', 'bac80', 'auc', 'score'])
+    prediction_summary = pd.DataFrame(columns=['subject', 'fold', 'y_pred', 'y_prob', 'y_true'])
     
-    for ss in range(len(labels)):
-        print(f'Processing subject {ss}')
+    for ss, subject in enumerate(unique_subjects):
+        print(f'Processing subject {subject}')
         
-        test_idx = [ss]
-        train_idxs, val_idxs = get_train_val_test_indices(labels, test_idx, seed)
+        fold_data, test_idxs = get_train_val_test_indices_kfold(description, labels, subject, seed)
+        y_test = labels[test_idxs]
         
-        y_train = labels[train_idxs]
-        y_val = labels[val_idxs]
-        y_test = labels[test_idx]
+        subject_predictions = []
         
-        best_classifiers, run_results = train_best_classifiers(
-            train_idxs, val_idxs, test_idx, y_train, y_val, seed
-        )
+        for fold_idx, (train_idxs, val_idxs) in enumerate(fold_data):
+            print(f'  Fold {fold_idx + 1}/5')
+            
+            y_train = labels[train_idxs]
+            y_val = labels[val_idxs]
+            
+            best_classifiers, run_results = train_best_classifiers(
+                train_idxs, val_idxs, test_idxs, y_train, y_val, seed
+            )
+            
+            # Log individual feature performance
+            for feature_name in best_classifiers:
+                auc, _, _, _, bac80, score, montage, segment_length, combiner = best_classifiers[feature_name]
+                wandb.log({
+                    f'aucs/{feature_name}': auc,
+                    f'bac80/{feature_name}': bac80,
+                    f'score/{feature_name}': score,
+                    f'best_montage/{feature_name}': montage,
+                    f'best_segment_length/{feature_name}': segment_length,
+                    f'best_combiner/{feature_name}': combiner
+                }, step=ss * 5 + fold_idx)
+            
+            # Add results to summary
+            for result in run_results:
+                newline = pd.DataFrame({**result, 'subject': subject, 'fold': fold_idx}, index=[0])
+                run_summary = pd.concat([run_summary, newline], ignore_index=True)
+            
+            y_test_pred, y_test_prob = make_ensemble_predictions(best_classifiers, y_val)
+            subject_predictions.append((y_test_pred, y_test_prob))
+            
+            pred_df = pd.DataFrame({
+                'subject': subject,
+                'fold': fold_idx,
+                'y_pred': y_test_pred,
+                'y_prob': y_test_prob,
+                'y_true': y_test
+            })
+            prediction_summary = pd.concat([prediction_summary, pred_df], ignore_index=True)
         
-        # Log individual feature performance
-        for feature_name in best_classifiers:
-            auc, _, _, _, bac80, score = best_classifiers[feature_name]
-            wandb.log({
-                f'aucs/{feature_name}': auc,
-                f'bac80/{feature_name}': bac80,
-                f'score/{feature_name}': score
-            }, step=ss)
+        # Average predictions across all folds for this subject
+        avg_pred = np.mean([pred[0] for pred in subject_predictions], axis=0)
+        avg_prob = np.mean([pred[1] for pred in subject_predictions], axis=0)
+        final_pred = (avg_prob >= 0.5).astype(int)
         
-        # Add results to summary
-        for result in run_results:
-            newline = pd.DataFrame({**result, 'subject': ss}, index=[0])
-            run_summary = pd.concat([run_summary, newline], ignore_index=True)
+        print(f'Final averaged predictions for subject {subject}: {final_pred}')
+        print(f'Final averaged probabilities for subject {subject}: {avg_prob}')
+        print(f'Ground truths for subject {subject}: {y_test}')
         
-        y_test_pred, y_test_prob = make_ensemble_predictions(best_classifiers, y_val)
-        
-        print(f'Final predictions for fold {ss}: {y_test_pred}')
-        print(f'Final probabilities for fold {ss}: {y_test_prob}')
-        print(f'Ground truths for fold {ss}: {y_test}')
-        
-        pred_df = pd.DataFrame({
-            'subject': ss,
-            'y_pred': y_test_pred,
-            'y_prob': y_test_prob,
+        # Add averaged predictions to summary
+        avg_pred_df = pd.DataFrame({
+            'subject': subject,
+            'fold': 'average',
+            'y_pred': final_pred,
+            'y_prob': avg_prob,
             'y_true': y_test
         })
-        prediction_summary = pd.concat([prediction_summary, pred_df], ignore_index=True)
+        prediction_summary = pd.concat([prediction_summary, avg_pred_df], ignore_index=True)
     
     return run_summary, prediction_summary
 
 def main():
     """Main execution function."""
     setup_environment()
-    labels = load_data()
+    description, labels, subjects, unique_subjects, subject_labels = load_data()
     
     for run_n in range(N_RUNS):
         seed = secrets.randbelow(5000)
@@ -297,7 +355,7 @@ def main():
         
         print(f'RUN {run_n+1} - Seed: {seed}')
         
-        run_summary, prediction_summary = run_loso_cv(labels, seed)
+        run_summary, prediction_summary = run_loso_cv(description, labels, subjects, unique_subjects, seed)
         
         # Evaluate results
         y_preds = np.array(prediction_summary['y_pred']).astype(int)

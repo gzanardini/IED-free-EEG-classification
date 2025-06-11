@@ -13,14 +13,17 @@ from sklearn.preprocessing import StandardScaler
 # Configuration
 N_RUNS = 5
 N_CUDA = 1
-DATA_FOLDER = '/space/gzanardini/emc_dataset/'
-PROJECT_NAME = 'emc_singleset_NOMWU'
+N_JOBS_XGB= 1  # Set to 1 for single GPU usage
+
+DATA_FOLDER = '/space/gzanardini/emc_whole/split/'
+PROJECT_NAME = 'emc_singleset_final'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 LOG_FOLDER = '/space/gzanardini/emc/'
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 segment_lengths = [1, 2, 5, 10, 20, 60]
 feature_names = ['cc', 'cwt', 'dwt', 'gcc', 'gplv', 'plv', 'mst', 'sst', 'spectral', 'utm']
+combiners=['mean', 'median', 'std', 'skew', 'kurt']
 
 
 def setup_environment():
@@ -62,22 +65,28 @@ def handle_complex_numbers(features):
     return features
 
 def load_data():
-    """Load the labels data."""
-    return np.load(f'{DATA_FOLDER}labels.npy')
+    """Load and prepare the dataset."""
+    description = pd.read_csv(f'{DATA_FOLDER}/description.csv')
+    labels = description['epilepsy'].to_numpy()
+    subjects = description['subject'].to_numpy()
+    unique_subjects = np.unique(description['subject'])
+    
+    subject_labels = []
+    for subj in unique_subjects:
+        lbl = labels[subjects == subj][0]
+        subject_labels.append([subj, lbl])
+    subject_labels = np.array(subject_labels)
 
-def load_feature_data(feature_name, montage, segment_length):
+    return description, labels, subjects, unique_subjects, subject_labels
+
+    
+def load_feature_data(feature_name, montage, segment_length, combiner):
     """Load and preprocess feature data."""
-    features = np.load(f'{DATA_FOLDER}{feature_name}_{montage}_{segment_length}s.npy')
-    
-    print(f'Features shape: {features.shape}')
-    if len(features.shape) > 2:
-        features = features.reshape(features.shape[0], -1)
+    features = np.load(f'{DATA_FOLDER}{feature_name}_{montage}_{segment_length}s_{combiner}.npy')
     features = handle_complex_numbers(features)
-    print(f'Processed features shape: {features.shape}')
-    
     return features
 
-def train_and_evaluate(features, labels):
+def train_and_evaluate(features, labels,seed):
     """Train models and evaluate using LOOCV."""
     y_preds = []
     y_scores = []
@@ -95,7 +104,7 @@ def train_and_evaluate(features, labels):
             n_estimators=100,
             max_depth=6, 
             device=f'cuda:{N_CUDA}',
-            seed=secrets.randbelow(5000),
+            seed=seed,
             subsample=0.9,
             scale_pos_weight=ratio,
             n_jobs=4,
@@ -155,7 +164,7 @@ def log_metrics(y_tests, y_preds, y_scores):
     
     return bac, bac80, auc, score, recall, precision, f1, accuracy
 
-def save_predictions(y_preds, y_scores, y_tests, montage, feature_name, segment_length, run_n, seed):
+def save_predictions(y_preds, y_scores, y_tests, montage, feature_name, segment_length,combiner, run_n, seed):
     """Save predictions and scores to CSV."""
     df = pd.DataFrame({
         'y_preds': y_preds,
@@ -166,24 +175,24 @@ def save_predictions(y_preds, y_scores, y_tests, montage, feature_name, segment_
     output_dir = f'{LOG_FOLDER}{PROJECT_NAME}/'
     os.makedirs(output_dir, exist_ok=True)
 
-    filename = f'{output_dir}predictions_{montage}_{feature_name}_{segment_length}s_run_{run_n}_seed_{seed}.csv'
+    filename = f'{output_dir}predictions_{montage}_{feature_name}_{segment_length}s_{combiner}_run_{run_n}_seed_{seed}.csv'
     df.to_csv(filename, index=False)
     print(f'Saved predictions to {filename}')
 
 def main():
     """Main execution function."""
     setup_environment()
-    labels = load_data()
+    description, labels, subjects, unique_subjects, subject_labels=load_data()    
     
-    for montage, feature_name, segment_length in itertools.product(montages, feature_names, segment_lengths):
-        features = load_feature_data(feature_name, montage, segment_length)
+    for montage, feature_name, segment_length, combiner in itertools.product(montages, feature_names, segment_lengths, combiners):
+        features = load_feature_data(feature_name, montage, segment_length, combiner)
         
         for run_n in range(N_RUNS):
             print(f'Run {run_n} - {montage} - {feature_name} - {segment_length}s -')
             
             wandb.init(
                 project=PROJECT_NAME,
-                name=f'{feature_name}_{montage}_{segment_length}s_run_{run_n}',
+                name=f'{feature_name}_{montage}_{segment_length}s_{combiner}run_{run_n}',
                 reinit=True
             )
             
@@ -196,12 +205,13 @@ def main():
                 'montage': montage,
                 'feature_name': feature_name,
                 'segment_length': segment_length,
+                'combiner': combiner,
                 'epochs' : False
             })
             
-            y_preds, y_scores, y_tests = train_and_evaluate(features, labels)
+            y_preds, y_scores, y_tests = train_and_evaluate(features, labels, seed)
             
-            save_predictions(y_preds, y_scores, y_tests, montage, feature_name, segment_length, run_n, seed)
+            save_predictions(y_preds, y_scores, y_tests, montage, feature_name, segment_length,combiner, run_n, seed)
 
             print(f'Y_preds shape: {y_preds.shape}')
             print(f'Y_scores shape: {y_scores.shape}')
