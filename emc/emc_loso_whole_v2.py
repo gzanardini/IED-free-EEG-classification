@@ -11,42 +11,12 @@ import warnings
 import cupy as cp
 from cupy.cuda import Device
 import random
+from sklearn.linear_model import LogisticRegression
+from multiprocessing import Pool, cpu_count
 from joblib import Parallel, delayed
+
 from scipy.optimize import minimize
-from scipy.special import expit, logit          # σ(x) = 1 / (1+e^{-x})
-
-np.set_printoptions(linewidth=200, precision=4)
-warnings.simplefilter(action='ignore', category=FutureWarning)
-# Configuration
-N_RUNS = 5
-N_CUDA = 0
-SPLIT_RATIO = 0.3
-PROJECT_NAME = 'tuh_ensemble_bucket'
-WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
-DATA_FOLDER = '/space/gzanardini/tuh_whole/split'
-LOG_FOLDER = '/space/gzanardini/tuh/'
-N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
-NUM_WORKERS = 16  # Number of parallel workers for training
-N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
-SCIPY_ARRAY_API=1
-
-montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
-segment_lengths = [1, 2, 5, 10, 20, 60]
-feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gcc', 'gplv']
-combiners = ['mean', 'median', 'std', 'skew', 'kurt']
-
-best_parameters = {
-    'spectral': ('CAR', 1 ,'skew'),
-    'cwt': ('BipolarDB', 60, 'std'),
-    'dwt': ('Cz', 10, 'skew'),
-    'mst': ('BipolarDB', 10, 'skew'),
-    'sst': ('Laplacian', 20, 'skew'),
-    'cc': ('Cz', 10, 'skew'),
-    'plv': ('Laplacian', 2, 'std'),
-    'gcc': ('CAR', 1, 'std'),
-    'gplv': ('BipolarDB', 1, 'mean'),
-    'utm': ('Laplacian', 60, 'mean')
-}
+from scipy.special import expit               # σ(x) = 1 / (1+e^{-x})
 
 def train_simplex_logistic(X, y, max_iter=2500):
     """
@@ -66,14 +36,10 @@ def train_simplex_logistic(X, y, max_iter=2500):
     # negative log-likelihood  (bias = 0)
     def nll(w):
         logits = X @ w
-        ce = -np.sum(y * np.log(expit(logits)) +
-                     (1 - y) * np.log(1 - expit(logits)))
-        alpha = 1        # α = 1 is uniform prior; α > 1 discourages zeros
+        return -np.sum(y * np.log(expit(logits)) +
+                       (1-y) * np.log(1-expit(logits)))
 
-        dirichlet_pen = (alpha - 1) * -np.sum(np.log(w + 1e-12))
-        return ce + dirichlet_pen
-
-    bounds      = [(0.0, None)] * d             # w_i ≥ 0
+    bounds      = [(0, None)] * d             # w_i ≥ 0
     constraints = {'type': 'eq',
                    'fun': lambda w: np.sum(w) - 1}
 
@@ -94,6 +60,40 @@ class SimplexLogistic:
     def predict_proba(self, X):
         p = expit(X @ self.coef_.ravel())
         return np.column_stack([1-p, p])
+
+np.set_printoptions(linewidth=200, precision=4)
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# Configuration
+N_RUNS = 5
+N_CUDA = 0
+SPLIT_RATIO = 0.3
+PROJECT_NAME = 'emc_ensemble'
+WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
+DATA_FOLDER = '/space/gzanardini/emc_whole/split'
+LOG_FOLDER = '/space/gzanardini/emc/'
+N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
+NUM_WORKERS = 10  # Number of parallel workers for training
+N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
+
+montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
+segment_lengths = [1, 2, 5, 10, 20, 60]
+feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gcc', 'gplv']
+combiners = ['mean', 'median', 'std', 'skew', 'kurt']
+
+
+best_parameters = {
+    'spectral': ('Cz',          10 ,    'std'),
+    'cwt':      ('BipolarDB',   2,      'median'),
+    'dwt':      ('Laplacian',   10,     'median'),
+    'mst':      ('BipolarDB',   60,     'median'),
+    'sst':      ('CAR',         10,     'median'),
+    'cc':       ('CAR',         1,      'std'),
+    'plv':      ('Laplacian',   60,      'kurt'),
+    'gcc':      ('CAR',         60,      'median'),
+    'gplv':     ('Laplacian',   2,      'std'),
+    'utm':      ('Laplacian',   20,     'std')
+}
 
 def setup_environment():
     """Initialize CUDA and wandb."""
@@ -188,31 +188,6 @@ def generate_feature_combinations():
     
     return combinations
 
-# Global variable to store preloaded data
-_feature_data_cache = {}
-
-def preload_all_feature_data():
-    """Preload all feature data to avoid repeated loading."""
-    print("Preloading all feature data...")
-    global _feature_data_cache
-    
-    for feature_name in feature_names:
-        montage, segment_length, combiner = best_parameters[feature_name]
-        data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
-        data = np.load(data_path)
-        data = handle_complex_numbers(data)
-        
-        if len(data.shape) > 2:
-            data = data.reshape(data.shape[0], -1)
-        
-        # Convert to cupy array for GPU processing
-        _feature_data_cache[feature_name] = cp.array(data)
-        print(f"Loaded {feature_name}: {data.shape}")
-
-def get_cached_feature_data(feature_name):
-    """Get preloaded feature data."""
-    return _feature_data_cache[feature_name]
-
 def train_feature_model_parallel(args):
     """Wrapper function for parallel feature model training."""
     feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed = args
@@ -303,7 +278,6 @@ def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, 
 def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
     """Train models for a combination of features in parallel and create an ensemble."""
     
-    # Use parallel training if combination has multiple features
     # Prepare arguments for parallel processing
     args_list = [
         (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i)
@@ -322,10 +296,9 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     for model in feature_models:
         del model['feature_name']
     
-    # Get logits from probabilities for each model
-    # Using logit function: log(p/(1-p)) which is the inverse of sigmoid
-    X_meta_val = np.column_stack([logit(np.clip(model['val_probs'], 0.001, 0.999)) for model in feature_models])
-    X_meta_test = np.column_stack([logit(np.clip(model['test_probs'], 0.001, 0.999)) for model in feature_models])
+    # Stack validation probabilities and train a meta-model (logistic regression)
+    X_meta_val = np.column_stack([model['val_probs'] for model in feature_models])
+    X_meta_test = np.column_stack([model['test_probs'] for model in feature_models])
 
     # Train simplex logistic regression meta-model
     w_simplex = train_simplex_logistic(X_meta_val, y_val)
@@ -342,6 +315,8 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     
     opt_threshold = find_optimal_threshold(y_val, meta_val_probs)
     meta_test_preds = (meta_test_probs >= opt_threshold).astype(int)
+
+    
     return {
         'feature_models': feature_models,
         'meta_model': meta_model,
@@ -354,6 +329,31 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'bac80': bac80,
         'lr_weights': meta_model.coef_[0],
     }
+
+# Global variable to store preloaded data
+_feature_data_cache = {}
+
+def preload_all_feature_data():
+    """Preload all feature data to avoid repeated loading."""
+    print("Preloading all feature data...")
+    global _feature_data_cache
+    
+    for feature_name in feature_names:
+        montage, segment_length, combiner = best_parameters[feature_name]
+        data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
+        data = np.load(data_path)
+        data = handle_complex_numbers(data)
+        
+        if len(data.shape) > 2:
+            data = data.reshape(data.shape[0], -1)
+        
+        # Convert to cupy array for GPU processing
+        _feature_data_cache[feature_name] = cp.array(data)
+        print(f"Loaded {feature_name}: {data.shape}")
+
+def get_cached_feature_data(feature_name):
+    """Get preloaded feature data."""
+    return _feature_data_cache[feature_name]
 
 def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
     """Save results to CSV files."""
@@ -373,10 +373,9 @@ def main():
     all_combinations = generate_feature_combinations()
     print(f"Generated {len(all_combinations)} feature combinations to evaluate")
     
-        # Evaluate each feature combination
+    # Evaluate each feature combination
     for combination in all_combinations:
         for run_n in range(N_RUNS):
-
             combination_name = '+'.join(combination)
             print(f"\nEvaluating combination: {combination_name}")
 
@@ -386,17 +385,16 @@ def main():
             cp.random.seed(seed)
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
-            # check if project exists 
-  
 
-            # skip_flag = False
-            # for existing_run in wandb.Api().runs(path=PROJECT_NAME):
-            #     if existing_run.name == RUN_NAME:
-            #         print(f"Run {RUN_NAME} already exists, skipping...")
-            #         skip_flag = True
-            #         break
-            # if skip_flag:
-            #     continue
+            skip_flag = False
+            for existing_run in wandb.Api().runs(path=PROJECT_NAME):
+                if existing_run.name == RUN_NAME:
+                    print(f"Run {RUN_NAME} already exists, skipping...")
+                    skip_flag = True
+                    break
+            if skip_flag:
+                continue
+
             
             wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True)
 
@@ -520,6 +518,9 @@ def main():
             # Finish wandb run
             wandb.finish()
             print(f"Run {RUN_NAME} completed successfully.")
+
+
+ 
 
 if __name__ == "__main__":
     main()

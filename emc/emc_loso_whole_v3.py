@@ -3,7 +3,8 @@ import wandb.plot
 from xgboost import XGBClassifier
 import numpy as np 
 import pandas as pd
-from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score, average_precision_score
+from sklearn.metrics import auc as auc_sklearn
 import itertools 
 import secrets
 from sklearn.model_selection import train_test_split
@@ -13,22 +14,23 @@ from cupy.cuda import Device
 import random
 from joblib import Parallel, delayed
 from scipy.optimize import minimize
-from scipy.special import expit, logit          # σ(x) = 1 / (1+e^{-x})
+from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
 
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
+
 # Configuration
 N_RUNS = 5
 N_CUDA = 0
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'tuh_ensemble_bucket'
+PROJECT_NAME = 'emc_ensemble_bucket_real'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
-DATA_FOLDER = '/space/gzanardini/tuh_whole/split'
-LOG_FOLDER = '/space/gzanardini/tuh/'
+DATA_FOLDER = '/space/gzanardini/emc_whole/split'
+LOG_FOLDER = '/space/gzanardini/emc/'
 N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
-NUM_WORKERS = 16  # Number of parallel workers for training
+NUM_WORKERS = 10  # Number of parallel workers for training
 N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
-SCIPY_ARRAY_API=1
+SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 segment_lengths = [1, 2, 5, 10, 20, 60]
@@ -36,30 +38,20 @@ feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gc
 combiners = ['mean', 'median', 'std', 'skew', 'kurt']
 
 best_parameters = {
-    'spectral': ('CAR', 1 ,'skew'),
-    'cwt': ('BipolarDB', 60, 'std'),
-    'dwt': ('Cz', 10, 'skew'),
-    'mst': ('BipolarDB', 10, 'skew'),
-    'sst': ('Laplacian', 20, 'skew'),
-    'cc': ('Cz', 10, 'skew'),
-    'plv': ('Laplacian', 2, 'std'),
-    'gcc': ('CAR', 1, 'std'),
-    'gplv': ('BipolarDB', 1, 'mean'),
-    'utm': ('Laplacian', 60, 'mean')
+    'spectral': ('Cz',          10 ,    'std'),
+    'cwt':      ('BipolarDB',   2,      'median'),
+    'dwt':      ('Laplacian',   10,     'median'),
+    'mst':      ('BipolarDB',   60,     'median'),
+    'sst':      ('CAR',         10,     'median'),
+    'cc':       ('CAR',         1,      'std'),
+    'plv':      ('Laplacian',   60,      'kurt'),
+    'gcc':      ('CAR',         60,      'median'),
+    'gplv':     ('Laplacian',   2,      'std'),
+    'utm':      ('Laplacian',   20,     'std')
 }
 
 def train_simplex_logistic(X, y, max_iter=2500):
-    """
-    Fit a bias-free logistic model with weights on the probability simplex.
 
-    Args
-    ----
-    X : (n_samples, n_models) validation probabilities of the base models
-    y : (n_samples,)           0/1 labels
-    Returns
-    -------
-    w : (n_models,) positive weights summing to 1
-    """
     d = X.shape[1]
     init_w = np.full(d, 1.0/d)                # uniform start
 
@@ -68,12 +60,11 @@ def train_simplex_logistic(X, y, max_iter=2500):
         logits = X @ w
         ce = -np.sum(y * np.log(expit(logits)) +
                      (1 - y) * np.log(1 - expit(logits)))
-        alpha = 1        # α = 1 is uniform prior; α > 1 discourages zeros
-
+        alpha = 1      # α = 1 is uniform prior; α > 1 discourages zeros
         dirichlet_pen = (alpha - 1) * -np.sum(np.log(w + 1e-12))
         return ce + dirichlet_pen
 
-    bounds      = [(0.0, None)] * d             # w_i ≥ 0
+    bounds      = [(0.00, None)] * d             # w_i ≥ 0
     constraints = {'type': 'eq',
                    'fun': lambda w: np.sum(w) - 1}
 
@@ -304,7 +295,7 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     """Train models for a combination of features in parallel and create an ensemble."""
     
     # Use parallel training if combination has multiple features
-    # Prepare arguments for parallel processing
+    #         # Prepare arguments for parallel processing
     args_list = [
         (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i)
         for i, feature_name in enumerate(feature_combination)
@@ -321,11 +312,16 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     # Remove feature_name from results as it's not needed anymore
     for model in feature_models:
         del model['feature_name']
-    
-    # Get logits from probabilities for each model
-    # Using logit function: log(p/(1-p)) which is the inverse of sigmoid
+        
+    # Stack validation probabilities and train a meta-model
     X_meta_val = np.column_stack([logit(np.clip(model['val_probs'], 0.001, 0.999)) for model in feature_models])
     X_meta_test = np.column_stack([logit(np.clip(model['test_probs'], 0.001, 0.999)) for model in feature_models])
+
+    # --- MinMax scaling on validation logits, apply same scaler to test logits ---
+    from sklearn.preprocessing import MinMaxScaler
+    scaler = MinMaxScaler()
+    X_meta_val = scaler.fit_transform(X_meta_val)
+    X_meta_test = scaler.transform(X_meta_test)
 
     # Train simplex logistic regression meta-model
     w_simplex = train_simplex_logistic(X_meta_val, y_val)
@@ -342,6 +338,7 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     
     opt_threshold = find_optimal_threshold(y_val, meta_val_probs)
     meta_test_preds = (meta_test_probs >= opt_threshold).astype(int)
+    
     return {
         'feature_models': feature_models,
         'meta_model': meta_model,
@@ -386,8 +383,6 @@ def main():
             cp.random.seed(seed)
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
-            # check if project exists 
-  
 
             # skip_flag = False
             # for existing_run in wandb.Api().runs(path=PROJECT_NAME):
@@ -397,7 +392,7 @@ def main():
             #         break
             # if skip_flag:
             #     continue
-            
+
             wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True)
 
             wandb.config.seed = seed
@@ -405,20 +400,15 @@ def main():
             wandb.config.combination_name = combination_name
         
             print(f'RUN {run_n+1}/{N_RUNS} - Seed: {seed}')
-            print(f"Using parallel training for {len(combination)} features with {min(N_PARALLEL_FEATURES, len(combination))} workers")
             
             # Initialize arrays to store predictions for this combination
             y_true_all = []
             y_pred_all = []
             y_prob_all = []
             subject_ids = []
-            
-            # Perform LOSO CV for this combination
-            print(f"Running LOSO CV for combination: {combination_name}")
-            
+                      
             # Iterate through all subjects (LOSO)
             for subject in unique_subjects:
-                print(f'Processing subject {subject} with {combination_name}')
                 
                 # Leave current subject out for testing
                 train_idxs, val_idxs, test_idxs = get_train_val_test_indices(
@@ -439,6 +429,7 @@ def main():
                     'validation/auc': ensemble_result['auc'],
                     'validation/bac': ensemble_result['bac'],
                     'validation/opt_threshold': ensemble_result['opt_threshold'],
+                    'validation/weights': wandb.Histogram(ensemble_result['lr_weights'])
                 })
 
                 print(f'LR Weights: {ensemble_result["lr_weights"]}')
@@ -476,10 +467,13 @@ def main():
             roc_line = wandb.plot.line(roc_table, "fpr", "tpr", title="ROC Curve")
             
             p, r, t = precision_recall_curve(y_true_all, y_prob_all)
-            pr_data = [[f, t] for f, t in zip(p, r)]
+            pr_data = [[f, t] for f, t in zip(r, p)]
             pr_table = wandb.Table(data=pr_data, columns=["precision", "recall"])
             pr_line = wandb.plot.line(pr_table, "precision", "recall", title="Precision-Recall Curve")
             
+            auprc = auc_sklearn(r, p)
+            ap = average_precision_score(y_true_all, y_prob_all)
+
 
             wandb.log({
                 'auc': auc,
@@ -491,7 +485,9 @@ def main():
                 'f1_score': f1,
                 'confusion_matrix': cm,
                 'roc_curve': roc_line,
-                'precision_recall_curve': pr_line
+                'precision_recall_curve': pr_line,
+                'auprc': auprc,
+                'AP': ap
             })
             # Prepare results DataFrame
             results = {
@@ -503,7 +499,9 @@ def main():
                 'accuracy': accuracy,
                 'precision': precision,
                 'recall': recall,
-                'f1_score': f1
+                'f1_score': f1,
+                'auprc': auprc,
+                'AP': ap,
             }
             results_df = pd.DataFrame([results])
             # Prepare predictions DataFrame
@@ -520,6 +518,9 @@ def main():
             # Finish wandb run
             wandb.finish()
             print(f"Run {RUN_NAME} completed successfully.")
+
+
+ 
 
 if __name__ == "__main__":
     main()

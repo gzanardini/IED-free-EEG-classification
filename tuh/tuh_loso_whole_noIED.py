@@ -21,7 +21,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 N_RUNS = 5
 N_CUDA = 0
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'tuh_ensemble_bucket'
+PROJECT_NAME = 'tuh_ens_penalty_noIED'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 DATA_FOLDER = '/space/gzanardini/tuh_whole/split'
 LOG_FOLDER = '/space/gzanardini/tuh/'
@@ -68,7 +68,7 @@ def train_simplex_logistic(X, y, max_iter=2500):
         logits = X @ w
         ce = -np.sum(y * np.log(expit(logits)) +
                      (1 - y) * np.log(1 - expit(logits)))
-        alpha = 1        # α = 1 is uniform prior; α > 1 discourages zeros
+        alpha = 1.05        # α = 1 is uniform prior; α > 1 discourages zeros
 
         dirichlet_pen = (alpha - 1) * -np.sum(np.log(w + 1e-12))
         return ce + dirichlet_pen
@@ -131,7 +131,9 @@ def handle_complex_numbers(features):
         features[~np.isfinite(features)] = np.nan
     return features
 
-def load_data():
+
+
+def load_data(no_ied=False):
     """Load and prepare the dataset."""
     description = pd.read_csv(f'{DATA_FOLDER}/description.csv')
     labels = description['epilepsy'].to_numpy()
@@ -143,7 +145,15 @@ def load_data():
         lbl = labels[subjects == subj][0]
         subject_labels.append([subj, lbl])
     subject_labels = np.array(subject_labels)
-    
+
+    if no_ied:
+        subject_to_skip = ['aaaaajgj', 'aaaaakcd']
+        for subj in subject_to_skip:
+            idx = np.where(unique_subjects == subj)[0]
+            if len(idx) > 0:
+                unique_subjects = np.delete(unique_subjects, idx)
+                labels = np.delete(labels, np.where(subjects == subj)[0])
+                print(f'Skipping subject {subj} --- CONTAINS IEDs')     
     return description, labels, subjects, unique_subjects, subject_labels
 
 def load_feature_data(feature_name):
@@ -326,6 +336,12 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     # Using logit function: log(p/(1-p)) which is the inverse of sigmoid
     X_meta_val = np.column_stack([logit(np.clip(model['val_probs'], 0.001, 0.999)) for model in feature_models])
     X_meta_test = np.column_stack([logit(np.clip(model['test_probs'], 0.001, 0.999)) for model in feature_models])
+
+    # --- MinMax scaling on validation logits, apply same scaler to test logits ---
+    from sklearn.preprocessing import MinMaxScaler
+    scaler = MinMaxScaler()
+    X_meta_val_scaled = scaler.fit_transform(X_meta_val)
+    X_meta_test = scaler.transform(X_meta_test)
 
     # Train simplex logistic regression meta-model
     w_simplex = train_simplex_logistic(X_meta_val, y_val)
