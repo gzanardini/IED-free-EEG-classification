@@ -3,7 +3,8 @@ import wandb.plot
 from xgboost import XGBClassifier
 import numpy as np 
 import pandas as pd
-from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score, average_precision_score
+from sklearn.metrics import auc as auc_sklearn
 import itertools 
 import secrets
 from sklearn.model_selection import train_test_split
@@ -11,35 +12,59 @@ import warnings
 import cupy as cp
 from cupy.cuda import Device
 import random
-from sklearn.linear_model import LogisticRegression
-from multiprocessing import Pool, cpu_count
 from joblib import Parallel, delayed
-
 from scipy.optimize import minimize
-from scipy.special import expit               # σ(x) = 1 / (1+e^{-x})
+from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
+
+np.set_printoptions(linewidth=200, precision=4)
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# Configuration
+N_RUNS = 5
+N_CUDA = 0
+SPLIT_RATIO = 0.3
+PROJECT_NAME = 'emc_bestwo2'
+WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
+DATA_FOLDER = '/space/gzanardini/emc_whole/split'
+LOG_FOLDER = '/space/gzanardini/emc/'
+N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
+NUM_WORKERS = 10  # Number of parallel workers for training
+N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
+SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
+
+montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
+segment_lengths = [1, 2, 5, 10, 20, 60]
+feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gcc', 'gplv']
+combiners = ['mean', 'median', 'std', 'skew', 'kurt']
+
+best_parameters = {
+    'spectral': ('Cz',          10 ,    'std'),
+    'cwt':      ('BipolarDB',   2,      'median'),
+    'dwt':      ('Laplacian',   10,     'median'),
+    'mst':      ('BipolarDB',   60,     'median'),
+    'sst':      ('CAR',         10,     'median'),
+    'cc':       ('CAR',         1,      'std'),
+    'plv':      ('Laplacian',   60,      'kurt'),
+    'gcc':      ('CAR',         60,      'median'),
+    'gplv':     ('Laplacian',   2,      'std'),
+    'utm':      ('Laplacian',   20,     'std')
+}
 
 def train_simplex_logistic(X, y, max_iter=2500):
-    """
-    Fit a bias-free logistic model with weights on the probability simplex.
 
-    Args
-    ----
-    X : (n_samples, n_models) validation probabilities of the base models
-    y : (n_samples,)           0/1 labels
-    Returns
-    -------
-    w : (n_models,) positive weights summing to 1
-    """
     d = X.shape[1]
     init_w = np.full(d, 1.0/d)                # uniform start
 
     # negative log-likelihood  (bias = 0)
     def nll(w):
         logits = X @ w
-        return -np.sum(y * np.log(expit(logits)) +
-                       (1-y) * np.log(1-expit(logits)))
+        ce = -np.sum(y * np.log(expit(logits)) +
+                     (1 - y) * np.log(1 - expit(logits)))
+        alpha = 1.05      # α = 1 is uniform prior; α > 1 discourages zeros
+        dirichlet_pen = (alpha - 1) * -np.sum(np.log(w + 1e-12))
+        return ce + dirichlet_pen
 
-    bounds      = [(0, None)] * d             # w_i ≥ 0
+    bounds      = [(0.00, None)] * d             # w_i ≥ 0
     constraints = {'type': 'eq',
                    'fun': lambda w: np.sum(w) - 1}
 
@@ -60,40 +85,6 @@ class SimplexLogistic:
     def predict_proba(self, X):
         p = expit(X @ self.coef_.ravel())
         return np.column_stack([1-p, p])
-
-np.set_printoptions(linewidth=200, precision=4)
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
-# Configuration
-N_RUNS = 5
-N_CUDA = 0
-SPLIT_RATIO = 0.3
-PROJECT_NAME = 'emc_ensemble'
-WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
-DATA_FOLDER = '/space/gzanardini/emc_whole/split'
-LOG_FOLDER = '/space/gzanardini/emc/'
-N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
-NUM_WORKERS = 10  # Number of parallel workers for training
-N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
-
-montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
-segment_lengths = [1, 2, 5, 10, 20, 60]
-feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gcc', 'gplv']
-combiners = ['mean', 'median', 'std', 'skew', 'kurt']
-
-
-best_parameters = {
-    'spectral': ('Cz',          10 ,    'std'),
-    'cwt':      ('BipolarDB',   2,      'median'),
-    'dwt':      ('Laplacian',   10,     'median'),
-    'mst':      ('BipolarDB',   60,     'median'),
-    'sst':      ('CAR',         10,     'median'),
-    'cc':       ('CAR',         1,      'std'),
-    'plv':      ('Laplacian',   60,      'kurt'),
-    'gcc':      ('CAR',         60,      'median'),
-    'gplv':     ('Laplacian',   2,      'std'),
-    'utm':      ('Laplacian',   20,     'std')
-}
 
 def setup_environment():
     """Initialize CUDA and wandb."""
@@ -176,17 +167,32 @@ def get_train_val_test_indices(description, labels, subject, seed):
     
     return train_idxs, val_idxs, test_idxs
 
-def generate_feature_combinations():
-    """Generate combinations of features from 2 to all features."""
-    combinations = []
+
+
+# Global variable to store preloaded data
+_feature_data_cache = {}
+
+def preload_all_feature_data():
+    """Preload all feature data to avoid repeated loading."""
+    print("Preloading all feature data...")
+    global _feature_data_cache
     
-    # Generate all combinations of 2 to len(feature_names) features
-    for i in range(2, len(feature_names) + 1):
-        combs = list(itertools.combinations(feature_names, i))
-        for comb in combs:
-            combinations.append(list(comb))
-    
-    return combinations
+    for feature_name in feature_names:
+        montage, segment_length, combiner = best_parameters[feature_name]
+        data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
+        data = np.load(data_path)
+        data = handle_complex_numbers(data)
+        
+        if len(data.shape) > 2:
+            data = data.reshape(data.shape[0], -1)
+        
+        # Convert to cupy array for GPU processing
+        _feature_data_cache[feature_name] = cp.array(data)
+        print(f"Loaded {feature_name}: {data.shape}")
+
+def get_cached_feature_data(feature_name):
+    """Get preloaded feature data."""
+    return _feature_data_cache[feature_name]
 
 def train_feature_model_parallel(args):
     """Wrapper function for parallel feature model training."""
@@ -278,7 +284,8 @@ def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, 
 def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
     """Train models for a combination of features in parallel and create an ensemble."""
     
-    # Prepare arguments for parallel processing
+    # Use parallel training if combination has multiple features
+    #         # Prepare arguments for parallel processing
     args_list = [
         (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i)
         for i, feature_name in enumerate(feature_combination)
@@ -295,12 +302,18 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     # Remove feature_name from results as it's not needed anymore
     for model in feature_models:
         del model['feature_name']
-    
-    # Stack validation probabilities and train a meta-model (logistic regression)
-    X_meta_val = np.column_stack([model['val_probs'] for model in feature_models])
-    X_meta_test = np.column_stack([model['test_probs'] for model in feature_models])
+        
+    # Stack validation probabilities and train a meta-model
+    X_meta_val = np.column_stack([logit(np.clip(model['val_probs'], 0.001, 0.999)) for model in feature_models])
+    X_meta_test = np.column_stack([logit(np.clip(model['test_probs'], 0.001, 0.999)) for model in feature_models])
 
-    # Train simplex logistic regression meta-model
+    # --- MinMax scaling on validation logits, apply same scaler to test logits ---
+    from sklearn.preprocessing import MinMaxScaler
+    scaler = MinMaxScaler()
+    X_meta_val = scaler.fit_transform(X_meta_val)
+    X_meta_test = scaler.transform(X_meta_test)
+
+    # Train logistic regression meta-model
     w_simplex = train_simplex_logistic(X_meta_val, y_val)
     meta_model = SimplexLogistic(w_simplex)
 
@@ -315,7 +328,6 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     
     opt_threshold = find_optimal_threshold(y_val, meta_val_probs)
     meta_test_preds = (meta_test_probs >= opt_threshold).astype(int)
-
     
     return {
         'feature_models': feature_models,
@@ -329,31 +341,6 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'bac80': bac80,
         'lr_weights': meta_model.coef_[0],
     }
-
-# Global variable to store preloaded data
-_feature_data_cache = {}
-
-def preload_all_feature_data():
-    """Preload all feature data to avoid repeated loading."""
-    print("Preloading all feature data...")
-    global _feature_data_cache
-    
-    for feature_name in feature_names:
-        montage, segment_length, combiner = best_parameters[feature_name]
-        data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
-        data = np.load(data_path)
-        data = handle_complex_numbers(data)
-        
-        if len(data.shape) > 2:
-            data = data.reshape(data.shape[0], -1)
-        
-        # Convert to cupy array for GPU processing
-        _feature_data_cache[feature_name] = cp.array(data)
-        print(f"Loaded {feature_name}: {data.shape}")
-
-def get_cached_feature_data(feature_name):
-    """Get preloaded feature data."""
-    return _feature_data_cache[feature_name]
 
 def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
     """Save results to CSV files."""
@@ -369,13 +356,17 @@ def main():
     # Preload all feature data once
     preload_all_feature_data()
     
-    # Generate all feature combinations once before starting runs
-    all_combinations = generate_feature_combinations()
-    print(f"Generated {len(all_combinations)} feature combinations to evaluate")
+    # Define specific feature combinations to evaluate
+    all_combinations = [['plv', 'cc'], ['plv', 'cwt']]
+    print(f"Evaluating {len(all_combinations)} specific feature combinations: {['+'.join(combo) for combo in all_combinations]}")
     
-    # Evaluate each feature combination
+
+
+
+        # Evaluate each feature combination
     for combination in all_combinations:
         for run_n in range(N_RUNS):
+
             combination_name = '+'.join(combination)
             print(f"\nEvaluating combination: {combination_name}")
 
@@ -386,16 +377,15 @@ def main():
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
 
-            skip_flag = False
-            for existing_run in wandb.Api().runs(path=PROJECT_NAME):
-                if existing_run.name == RUN_NAME:
-                    print(f"Run {RUN_NAME} already exists, skipping...")
-                    skip_flag = True
-                    break
-            if skip_flag:
-                continue
+            # skip_flag = False
+            # for existing_run in wandb.Api().runs(path=PROJECT_NAME):
+            #     if existing_run.name == RUN_NAME:
+            #         print(f"Run {RUN_NAME} already exists, skipping...")
+            #         skip_flag = True
+            #         break
+            # if skip_flag:
+            #     continue
 
-            
             wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True)
 
             wandb.config.seed = seed
@@ -403,20 +393,16 @@ def main():
             wandb.config.combination_name = combination_name
         
             print(f'RUN {run_n+1}/{N_RUNS} - Seed: {seed}')
-            print(f"Using parallel training for {len(combination)} features with {min(N_PARALLEL_FEATURES, len(combination))} workers")
             
             # Initialize arrays to store predictions for this combination
             y_true_all = []
             y_pred_all = []
             y_prob_all = []
             subject_ids = []
-            
-            # Perform LOSO CV for this combination
-            print(f"Running LOSO CV for combination: {combination_name}")
-            
+            all_fold_weights = []  # Store weights from each fold
+                      
             # Iterate through all subjects (LOSO)
-            for subject in unique_subjects:
-                print(f'Processing subject {subject} with {combination_name}')
+            for fold_idx, subject in enumerate(unique_subjects):
                 
                 # Leave current subject out for testing
                 train_idxs, val_idxs, test_idxs = get_train_val_test_indices(
@@ -433,13 +419,24 @@ def main():
                 )
 
                 wandb.log({
-                    'validation/bac80:': ensemble_result['bac80'],
-                    'validation/auc': ensemble_result['auc'],
-                    'validation/bac': ensemble_result['bac'],
-                    'validation/opt_threshold': ensemble_result['opt_threshold'],
+                    f'validation/bac80': ensemble_result['bac80'],
+                    f'validation/auc': ensemble_result['auc'],
+                    f'validation/bac': ensemble_result['bac'],
+                    f'validation/opt_threshold': ensemble_result['opt_threshold'],
+                    f'validation/weights': wandb.Histogram(ensemble_result['lr_weights'])
                 })
 
-                print(f'LR Weights: {ensemble_result["lr_weights"]}')
+                # Store fold weights with feature names for better tracking
+                fold_weights_dict = {f'weight_{i}_{feat}': weight for i, (feat, weight) in 
+                                   enumerate(zip(combination, ensemble_result['lr_weights']))}
+                fold_weights_dict['fold'] = fold_idx
+                fold_weights_dict['subject'] = subject
+                wandb.log(fold_weights_dict)
+                
+                # Store weights for averaging later
+                all_fold_weights.append(ensemble_result['lr_weights'])
+
+                print(f' Subject {subject} - LR Weights: {ensemble_result["lr_weights"]}')
                 
                 # Store predictions for this subject
                 y_true_all.extend(y_test)
@@ -450,6 +447,29 @@ def main():
             
             # After LOSO CV is complete for this combination, calculate overall metrics
             print(f"LOSO CV complete for combination: {combination_name}, calculating metrics...")
+            
+            # Calculate average weights across all folds
+            all_fold_weights = np.array(all_fold_weights)
+            avg_weights = np.mean(all_fold_weights, axis=0)
+            std_weights = np.std(all_fold_weights, axis=0)
+            
+            print(f"Average meta learner weights across {len(all_fold_weights)} folds:")
+            for i, (feat, avg_w, std_w) in enumerate(zip(combination, avg_weights, std_weights)):
+                print(f"  {feat}: {avg_w:.4f} ± {std_w:.4f}")
+            
+            # Log average weights to wandb
+            avg_weights_dict = {f'avg_weight_{i}_{feat}': weight for i, (feat, weight) in 
+                              enumerate(zip(combination, avg_weights))}
+            std_weights_dict = {f'std_weight_{i}_{feat}': weight for i, (feat, weight) in 
+                              enumerate(zip(combination, std_weights))}
+            
+            wandb.log({
+                **avg_weights_dict,
+                **std_weights_dict,
+                'avg_weights_histogram': wandb.Histogram(avg_weights),
+                'weights_std_histogram': wandb.Histogram(std_weights),
+                'n_folds': len(all_fold_weights)
+            })
             
             # Calculate overall performance
             y_true_all = np.array(y_true_all)
@@ -474,10 +494,13 @@ def main():
             roc_line = wandb.plot.line(roc_table, "fpr", "tpr", title="ROC Curve")
             
             p, r, t = precision_recall_curve(y_true_all, y_prob_all)
-            pr_data = [[f, t] for f, t in zip(p, r)]
+            pr_data = [[f, t] for f, t in zip(r, p)]
             pr_table = wandb.Table(data=pr_data, columns=["precision", "recall"])
             pr_line = wandb.plot.line(pr_table, "precision", "recall", title="Precision-Recall Curve")
             
+            auprc = auc_sklearn(r, p)
+            ap = average_precision_score(y_true_all, y_prob_all)
+
 
             wandb.log({
                 'auc': auc,
@@ -489,7 +512,9 @@ def main():
                 'f1_score': f1,
                 'confusion_matrix': cm,
                 'roc_curve': roc_line,
-                'precision_recall_curve': pr_line
+                'precision_recall_curve': pr_line,
+                'auprc': auprc,
+                'AP': ap
             })
             # Prepare results DataFrame
             results = {
@@ -501,7 +526,9 @@ def main():
                 'accuracy': accuracy,
                 'precision': precision,
                 'recall': recall,
-                'f1_score': f1
+                'f1_score': f1,
+                'auprc': auprc,
+                'AP': ap,
             }
             results_df = pd.DataFrame([results])
             # Prepare predictions DataFrame
@@ -518,9 +545,6 @@ def main():
             # Finish wandb run
             wandb.finish()
             print(f"Run {RUN_NAME} completed successfully.")
-
-
- 
 
 if __name__ == "__main__":
     main()

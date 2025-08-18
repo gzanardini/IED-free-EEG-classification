@@ -15,6 +15,9 @@ import random
 from joblib import Parallel, delayed
 from scipy.optimize import minimize
 from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
+from sklearn.isotonic import IsotonicRegression
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -97,6 +100,82 @@ def find_optimal_threshold(y_true, y_prob):
     gmeans = np.sqrt(tpr * (1 - fpr))
     opt_index = np.argmax(gmeans)
     return thresholds[opt_index]
+
+def log_probability_analysis(probs_dict, feature_names, stage_name, subject_id=None):
+    """
+    Log probability distributions and covariance analysis to wandb.
+    
+    Args:
+        probs_dict: Dictionary with keys like 'raw', 'calibrated', 'logits', 'meta'
+        feature_names: List of feature names
+        stage_name: String identifier for the stage (e.g., 'stage1_val', 'stage2_test')
+        subject_id: Optional subject identifier for LOSO logging
+    """
+    prefix = f"{stage_name}"
+    if subject_id is not None:
+        prefix = f"{stage_name}/subject_{subject_id}"
+    
+    # Log histograms for each type of probability
+    for prob_type, prob_data in probs_dict.items():
+        if prob_data is not None:
+            if prob_type == 'meta':
+                # Meta predictions are 1D
+                wandb.log({
+                    f"{prefix}/hist_{prob_type}": wandb.Histogram(prob_data)
+                })
+            else:
+                # Individual feature predictions are 2D
+                for i, feature_name in enumerate(feature_names):
+                    if i < prob_data.shape[1]:
+                        wandb.log({
+                            f"{prefix}/hist_{prob_type}_{feature_name}": wandb.Histogram(prob_data[:, i])
+                        })
+    
+    # Create and log covariance matrices
+    for prob_type, prob_data in probs_dict.items():
+        if prob_data is not None and prob_type != 'meta' and prob_data.shape[1] > 1:
+            # Calculate covariance matrix
+            cov_matrix = np.cov(prob_data.T)
+            
+            # Create covariance heatmap
+            plt.figure(figsize=(10, 8))
+            mask = np.triu(np.ones_like(cov_matrix, dtype=bool), k=1)
+            sns.heatmap(cov_matrix, 
+                       annot=True, 
+                       fmt='.3f', 
+                       cmap='coolwarm', 
+                       center=0,
+                       mask=mask,
+                       xticklabels=feature_names[:prob_data.shape[1]], 
+                       yticklabels=feature_names[:prob_data.shape[1]],
+                       cbar_kws={'label': 'Covariance'})
+            plt.title(f'Covariance Matrix - {prob_type.capitalize()} Probabilities ({stage_name})')
+            plt.tight_layout()
+            
+            # Log to wandb
+            wandb.log({f"{prefix}/cov_matrix_{prob_type}": wandb.Image(plt)})
+            plt.close()
+            
+            # Also log correlation matrix
+            corr_matrix = np.corrcoef(prob_data.T)
+            plt.figure(figsize=(10, 8))
+            mask = np.triu(np.ones_like(corr_matrix, dtype=bool), k=1)
+            sns.heatmap(corr_matrix, 
+                       annot=True, 
+                       fmt='.3f', 
+                       cmap='coolwarm', 
+                       center=0,
+                       mask=mask,
+                       vmin=-1, vmax=1,
+                       xticklabels=feature_names[:prob_data.shape[1]], 
+                       yticklabels=feature_names[:prob_data.shape[1]],
+                       cbar_kws={'label': 'Correlation'})
+            plt.title(f'Correlation Matrix - {prob_type.capitalize()} Probabilities ({stage_name})')
+            plt.tight_layout()
+            
+            # Log to wandb
+            wandb.log({f"{prefix}/corr_matrix_{prob_type}": wandb.Image(plt)})
+            plt.close()
 
 def calculate_bac(labels, scores, sens_thresh):
     """Calculate balanced accuracy with sensitivity threshold."""
@@ -206,7 +285,7 @@ def get_cached_feature_data(feature_name):
 
 def train_feature_model_parallel(args):
     """Wrapper function for parallel feature model training."""
-    feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed = args
+    feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed, retrain_on_trainval = args
     
     # Set random seeds for this process
     random.seed(seed)
@@ -215,42 +294,71 @@ def train_feature_model_parallel(args):
     # Get cached data instead of loading
     data = get_cached_feature_data(feature_name)
     
-    ratio = (len(y_train) - sum(y_train)) / sum(y_train)
-    
-    model = XGBClassifier(
-        scale_pos_weight=ratio,
-        n_jobs=1,  # Keep this as 1 since we're parallelizing at higher level
-        device=f'cuda:{N_CUDA}',
-        n_estimators=100,
-        seed=seed,
-        max_depth=6,
-        subsample=0.9,
-        gamma=0.1,
-        learning_rate=0.01
-    )
-    model.fit(data[train_idxs], y_train)
-    
-    # Generate predictions
-    train_probs = model.predict_proba(data[train_idxs])[:, 1]
-    val_probs = model.predict_proba(data[val_idxs])[:, 1]
-    test_probs = model.predict_proba(data[test_idxs])[:, 1]
-    
-    # Calculate metrics
-    auc = roc_auc_score(y_val, val_probs)
-    bac = balanced_accuracy_score(y_val, val_probs >= 0.5)
-    bac80, _, _, _ = calculate_bac(y_val, val_probs, 0.8)
-    score = auc + bac
+    if retrain_on_trainval:
+        # Second stage: Train on train+val data for final predictions
+        train_val_idxs = np.concatenate([train_idxs, val_idxs])
+        y_train_val = np.concatenate([y_train, y_val])
+        ratio = (len(y_train_val) - sum(y_train_val)) / sum(y_train_val)
         
-    return {
-        'feature_name': feature_name,
-        'train_probs': train_probs,
-        'val_probs': val_probs,
-        'test_probs': test_probs,
-        'auc': auc,
-        'bac': bac,
-        'bac80': bac80,
-        'score': score
-    }
+        model = XGBClassifier(
+            scale_pos_weight=ratio,
+            n_jobs=1,
+            device=f'cuda:{N_CUDA}',
+            n_estimators=100,
+            seed=seed,
+            max_depth=6,
+            subsample=0.9,
+            gamma=0.1,
+            learning_rate=0.01
+        )
+        model.fit(data[train_val_idxs], y_train_val)
+        
+        # Only generate test predictions for final stage
+        test_probs = model.predict_proba(data[test_idxs])[:, 1]
+        
+        return {
+            'feature_name': feature_name,
+            'test_probs': test_probs,
+            'model': model
+        }
+    else:
+        # First stage: Train on train data, validate on val data
+        ratio = (len(y_train) - sum(y_train)) / sum(y_train)
+        
+        model = XGBClassifier(
+            scale_pos_weight=ratio,
+            n_jobs=1,
+            device=f'cuda:{N_CUDA}',
+            n_estimators=100,
+            seed=seed,
+            max_depth=6,
+            subsample=0.9,
+            gamma=0.1,
+            learning_rate=0.01
+        )
+        model.fit(data[train_idxs], y_train)
+        
+        # Generate predictions
+        train_probs = model.predict_proba(data[train_idxs])[:, 1]
+        val_probs = model.predict_proba(data[val_idxs])[:, 1]
+        test_probs = model.predict_proba(data[test_idxs])[:, 1]
+        
+        # Calculate metrics
+        auc = roc_auc_score(y_val, val_probs)
+        bac = balanced_accuracy_score(y_val, val_probs >= 0.5)
+        bac80, _, _, _ = calculate_bac(y_val, val_probs, 0.8)
+        score = auc + bac
+            
+        return {
+            'feature_name': feature_name,
+            'train_probs': train_probs,
+            'val_probs': val_probs,
+            'test_probs': test_probs,
+            'auc': auc,
+            'bac': bac,
+            'bac80': bac80,
+            'score': score
+        }
 
 def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
     """Train a model for a single feature using cached data."""
@@ -292,63 +400,155 @@ def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, 
     }
 
 def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
-    """Train models for a combination of features in parallel and create an ensemble."""
+    """Train models for a combination of features in parallel and create an ensemble with two-stage training."""
     
-    # Use parallel training if combination has multiple features
-    #         # Prepare arguments for parallel processing
-    args_list = [
-        (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i)
+    # STAGE 1: Train models on train data, validate on val data, learn meta-learner weights
+    print(f"Stage 1: Training individual models and learning meta-learner weights...")
+    
+    # Prepare arguments for parallel processing (first stage)
+    args_list_stage1 = [
+        (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i, False)
         for i, feature_name in enumerate(feature_combination)
     ]
     
     # Train feature models in parallel using joblib (thread-based for GPU compatibility)
-    feature_results = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
-        delayed(train_feature_model_parallel)(args) for args in args_list
+    feature_results_stage1 = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
+        delayed(train_feature_model_parallel)(args) for args in args_list_stage1
     )
     
     # Sort results to maintain order
-    feature_models = sorted(feature_results, key=lambda x: feature_combination.index(x['feature_name']))
+    feature_models_stage1 = sorted(feature_results_stage1, key=lambda x: feature_combination.index(x['feature_name']))
     
-    # Remove feature_name from results as it's not needed anymore
-    for model in feature_models:
-        del model['feature_name']
-        
-    # Stack validation probabilities and train a meta-model
-    X_meta_val = np.column_stack([logit(np.clip(model['val_probs'], 0.001, 0.999)) for model in feature_models])
-    X_meta_test = np.column_stack([logit(np.clip(model['test_probs'], 0.001, 0.999)) for model in feature_models])
+    # Stack validation probabilities and calibrate them
+    
+    val_probs_list = [model['val_probs'] for model in feature_models_stage1]
+    
+    # Calibrate each model's probabilities using isotonic regression
+    calibrated_probs = []
+    calibrators = []
+    for i, probs in enumerate(val_probs_list):
+        calibrator = IsotonicRegression(out_of_bounds='clip')
+        cal_probs = calibrator.fit_transform(probs, y_val)
+        calibrated_probs.append(cal_probs)
+        calibrators.append(calibrator)
+    
+    # Convert calibrated probabilities to logits
+    X_meta_val = np.column_stack([logit(np.clip(probs, 0.001, 0.999)) for probs in calibrated_probs])
 
-    # --- MinMax scaling on validation logits, apply same scaler to test logits ---
-    from sklearn.preprocessing import MinMaxScaler
-    scaler = MinMaxScaler()
-    X_meta_val = scaler.fit_transform(X_meta_val)
-    X_meta_test = scaler.transform(X_meta_test)
-
-    # Train logistic regression meta-model
+    # Train logistic regression meta-model to learn weights
     w_simplex = train_simplex_logistic(X_meta_val, y_val)
     meta_model = SimplexLogistic(w_simplex)
-
-    # Generate test predictions
+    
+    # Calculate validation metrics for logging
     meta_val_probs = meta_model.predict_proba(X_meta_val)[:, 1]
+    stage1_auc = roc_auc_score(y_val, meta_val_probs)
+    stage1_bac = balanced_accuracy_score(y_val, meta_val_probs >= 0.5)
+    stage1_bac80, _, _, _ = calculate_bac(y_val, meta_val_probs, 0.8)
+    
+    print(f"Stage 1 - Meta-learner weights: {w_simplex}")
+    print(f"Stage 1 - Validation AUC: {stage1_auc:.4f}, BAC: {stage1_bac:.4f}, BAC80: {stage1_bac80:.4f}")
+    
+    # === STAGE 1 LOGGING ===
+    # Prepare probability data for logging
+    raw_val_probs = np.column_stack(val_probs_list)
+    calibrated_val_probs = np.column_stack(calibrated_probs)
+    logits_val = X_meta_val
+    
+    stage1_probs = {
+        'raw': raw_val_probs,
+        'calibrated': calibrated_val_probs, 
+        'logits': logits_val,
+        'meta': meta_val_probs
+    }
+    
+    # Log Stage 1 analysis
+    log_probability_analysis(stage1_probs, feature_combination, 'stage1_validation')
+    
+    # Log stage 1 specific metrics
+    wandb.log({
+        'stage1/auc': stage1_auc,
+        'stage1/bac': stage1_bac,
+        'stage1/bac80': stage1_bac80,
+        'stage1/weights': wandb.Histogram(w_simplex),
+        'stage1/meta_probs': wandb.Histogram(meta_val_probs)
+    })
+    
+    # STAGE 2: Retrain models on train+val data using learned weights, predict on test
+    print(f"Stage 2: Retraining models on train+val data for final predictions...")
+    
+    # Prepare arguments for parallel processing (second stage)
+    args_list_stage2 = [
+        (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i, True)
+        for i, feature_name in enumerate(feature_combination)
+    ]
+    
+    # Retrain feature models on train+val data
+    feature_results_stage2 = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
+        delayed(train_feature_model_parallel)(args) for args in args_list_stage2
+    )
+    
+    # Sort results to maintain order
+    feature_models_stage2 = sorted(feature_results_stage2, key=lambda x: feature_combination.index(x['feature_name']))
+    
+    # Remove feature_name from results as it's not needed anymore
+    for model in feature_models_stage2:
+        del model['feature_name']
+    
+    # Stack test probabilities and apply calibrators
+    test_probs_list = [model['test_probs'] for model in feature_models_stage2]
+    
+    # Apply calibrators to test probabilities
+    calibrated_test_probs = []
+    for i, probs in enumerate(test_probs_list):
+        cal_test_probs = calibrators[i].transform(probs)
+        calibrated_test_probs.append(cal_test_probs)
+    
+    # Convert calibrated test probabilities to logits
+    X_meta_test = np.column_stack([logit(np.clip(probs, 0.001, 0.999)) for probs in calibrated_test_probs])
+
+    # Generate final test predictions using the learned meta-model weights
     meta_test_probs = meta_model.predict_proba(X_meta_test)[:, 1]
     
-    # Calculate metrics
-    auc = roc_auc_score(y_val, meta_val_probs)
-    bac = balanced_accuracy_score(y_val, meta_val_probs >= 0.5)
-    bac80, _, _, _ = calculate_bac(y_val, meta_val_probs, 0.8)
-    
+    # Use validation data to find optimal threshold (from stage 1)
     opt_threshold = find_optimal_threshold(y_val, meta_val_probs)
     meta_test_preds = (meta_test_probs >= opt_threshold).astype(int)
     
+    print(f"Stage 2 - Final predictions generated using learned weights")
+    
+    # === STAGE 2 LOGGING ===
+    # Prepare probability data for logging
+    raw_test_probs = np.column_stack(test_probs_list)
+    calibrated_test_probs_matrix = np.column_stack(calibrated_test_probs)
+    logits_test = X_meta_test
+    
+    stage2_probs = {
+        'raw': raw_test_probs,
+        'calibrated': calibrated_test_probs_matrix,
+        'logits': logits_test,
+        'meta': meta_test_probs
+    }
+    
+    # Log Stage 2 analysis
+    log_probability_analysis(stage2_probs, feature_combination, 'stage2_test')
+    
+    # Log stage 2 specific metrics
+    wandb.log({
+        'stage2/meta_probs': wandb.Histogram(meta_test_probs),
+        'stage2/meta_preds': wandb.Histogram(meta_test_preds),
+        'stage2/opt_threshold': opt_threshold
+    })
+    
     return {
-        'feature_models': feature_models,
+        'feature_models': feature_models_stage2,  # Final retrained models
         'meta_model': meta_model,
-        'val_probs': meta_val_probs,
-        'test_probs': meta_test_probs,
+        'calibrators': calibrators,
+        'val_probs': meta_val_probs,  # From stage 1 for threshold selection
+        'test_probs': meta_test_probs,  # From stage 2 for final evaluation
         'test_preds': meta_test_preds,
         'opt_threshold': opt_threshold,
-        'auc': auc,
-        'bac': bac,
-        'bac80': bac80,
+        'auc': stage1_auc,  # Validation metrics from stage 1
+        'bac': stage1_bac,
+        'bac80': stage1_bac80,
         'lr_weights': meta_model.coef_[0],
     }
 
