@@ -16,8 +16,6 @@ from joblib import Parallel, delayed
 from scipy.optimize import minimize
 from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
 from sklearn.isotonic import IsotonicRegression
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -253,7 +251,7 @@ def generate_feature_combinations():
     combinations = []
     
     # Generate all combinations of 2 to len(feature_names) features
-    for i in range(5, len(feature_names) + 1):
+    for i in range(3, len(feature_names) + 1):
         combs = list(itertools.combinations(feature_names, i))
         for comb in combs:
             combinations.append(list(comb))
@@ -601,10 +599,11 @@ def main():
     
     # Evaluate each feature combination
     for combination in all_combinations:
+        print(f"\nEvaluating combination: {combination_name}")
+
         for run_n in range(N_RUNS):
 
             combination_name = '+'.join(combination)
-            print(f"\nEvaluating combination: {combination_name}")
 
             seed = secrets.randbelow(5000)
             random.seed(seed)

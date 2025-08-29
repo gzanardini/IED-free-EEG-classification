@@ -7,6 +7,7 @@ wandb/*
 *.pth
 *.pt
 *.npy
+*.pdf
 *.npz
 *.csv
 *.pkl

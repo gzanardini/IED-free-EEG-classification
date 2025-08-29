@@ -203,7 +203,7 @@ def generate_feature_combinations():
     combinations = []
     
     # Generate all combinations of 2 to len(feature_names) features
-    for i in range(5, len(feature_names) + 1):
+    for i in range(2, len(feature_names) + 1):
         combs = list(itertools.combinations(feature_names, i))
         for comb in combs:
             combinations.append(list(comb))
@@ -546,7 +546,7 @@ def main():
             if skip_flag:
                 continue
 
-            wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True)
+            wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True, dir=LOG_FOLDER)
 
             wandb.config.seed = seed
             wandb.config.combination_length = len(combination)

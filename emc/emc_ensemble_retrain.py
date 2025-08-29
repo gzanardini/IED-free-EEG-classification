@@ -16,8 +16,7 @@ from joblib import Parallel, delayed
 from scipy.optimize import minimize
 from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
 from sklearn.isotonic import IsotonicRegression
-import matplotlib.pyplot as plt
-import seaborn as sns
+
 
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -25,13 +24,14 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # Configuration
 N_RUNS = 5
 N_CUDA = 0
+DEVICE = 'cpu'
 SPLIT_RATIO = 0.3
 PROJECT_NAME = 'emc_ensemble_retrain'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 DATA_FOLDER = '/space/gzanardini/emc_whole/split'
 LOG_FOLDER = '/space/gzanardini/emc/'
-N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
-NUM_WORKERS = 10  # Number of parallel workers for training
+N_JOBS_XGB = 4  # Set to 1 for compatibility with CUDA
+NUM_WORKERS = 10  # Number of max parallel workers for training
 N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
 SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
 
@@ -91,7 +91,8 @@ class SimplexLogistic:
 
 def setup_environment():
     """Initialize CUDA and wandb."""
-    Device(N_CUDA).use()
+    if DEVICE != 'cpu':
+        Device(N_CUDA).use()
     wandb.login(key=WANDB_KEY)
     
 def find_optimal_threshold(y_true, y_prob):
@@ -201,13 +202,12 @@ def generate_feature_combinations():
     combinations = []
     
     # Generate all combinations of 2 to len(feature_names) features
-    for i in range(5, len(feature_names) + 1):
+    for i in range(4, len(feature_names) + 1):
         combs = list(itertools.combinations(feature_names, i))
         for comb in combs:
             combinations.append(list(comb))
     
     return combinations
-
 
 # Global variable to store preloaded data
 _feature_data_cache = {}
@@ -253,8 +253,8 @@ def train_feature_model_parallel(args):
         
         model = XGBClassifier(
             scale_pos_weight=ratio,
-            n_jobs=1,
-            device=f'cuda:{N_CUDA}',
+            n_jobs=N_JOBS_XGB,
+            device=DEVICE,
             n_estimators=100,
             seed=seed,
             max_depth=6,
@@ -278,8 +278,8 @@ def train_feature_model_parallel(args):
         
         model = XGBClassifier(
             scale_pos_weight=ratio,
-            n_jobs=1,
-            device=f'cuda:{N_CUDA}',
+            n_jobs=N_JOBS_XGB,
+            device=DEVICE,
             n_estimators=100,
             seed=seed,
             max_depth=6,
@@ -319,7 +319,7 @@ def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, 
     model = XGBClassifier(
         scale_pos_weight=ratio,
         n_jobs=N_JOBS_XGB,
-        device=f'cuda:{N_CUDA}',
+        device=DEVICE,
         n_estimators=100,
         seed=seed,
         max_depth=6,
@@ -516,6 +516,8 @@ def main():
     
     # Preload all feature data once
     preload_all_feature_data()
+
+    checkpoint=False
     
     # Generate all feature combinations once before starting runs
     all_combinations = generate_feature_combinations()
@@ -534,6 +536,13 @@ def main():
             cp.random.seed(seed)
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
+            if not checkpoint:
+                if RUN_NAME == 'dwt+mst+sst+gplv_run_4' :    #   for length 5 if crashes -> 'cc+cwt+utm+gcc+gplv_run_3'
+                    checkpoint = True
+                    print(f"Reached checkpoint: {RUN_NAME}, continuing with this and remaining runs...")
+                else:
+                    print(f"Skipping run {RUN_NAME} (before checkpoint)...")
+                    continue
 
             skip_flag = False
             for existing_run in wandb.Api(timeout=29).runs(path=PROJECT_NAME):
@@ -544,7 +553,7 @@ def main():
             if skip_flag:
                 continue
 
-            wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True)
+            wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True, dir=LOG_FOLDER)
 
             wandb.config.seed = seed
             wandb.config.combination_length = len(combination)
