@@ -251,11 +251,11 @@ def generate_feature_combinations():
     combinations = []
     
     # Generate all combinations of 2 to len(feature_names) features
-    for i in range(3, len(feature_names) + 1):
+    #for i in range(3, len(feature_names) + 1):
+    for i in range(3,5): # Limit to combinations of 3 and 4 features for efficiency
         combs = list(itertools.combinations(feature_names, i))
         for comb in combs:
             combinations.append(list(comb))
-    
     return combinations
 
 def train_feature_model_parallel(args):
@@ -599,7 +599,7 @@ def main():
     
     # Evaluate each feature combination
     for combination in all_combinations:
-        print(f"\nEvaluating combination: {combination_name}")
+        print(f"\nEvaluating combination: {'+'.join(combination)}")
 
         for run_n in range(N_RUNS):
 

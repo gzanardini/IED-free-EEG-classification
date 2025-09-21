@@ -18,12 +18,10 @@ class HiddenPrints:
 
 
 
-photostimulation_data_path = '/space/gzanardini/tuh_eeg/preprocessed'
+data_file='/space/gzanardini/tuh_eeg/preprocessed/no_photostim_periods.pkl'
+data=pkl.load(open(data_file, 'rb'))
 feature_path= '/space/gzanardini/tuh_background/'
-
-stim_samples=pkl.load(open(os.path.join(photostimulation_data_path, 'stim_samples.pkl'), 'rb'))
-
-FS=int(stim_samples[0].info['sfreq'])
+FS=int(250)
 
 combiner_names = ['mean', 'median', 'std', 'skewness', 'kurtosis']
 
@@ -35,12 +33,9 @@ for montage in montages:
     for segment_length in segment_lengths:
         print(f'Processing montage: {montage}, segment length: {segment_length}')
         spectral_features = []
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data=sample.get_data()
-
-            print(f"Data shape: {data.shape}")
-            spectral_features.append(yf.run_spectral_seg2(data,FS,MONTAGE=montage,sec=segment_length))
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
+            spectral_features.append(yf.run_spectral_seg2(sample,FS,MONTAGE=montage,sec=segment_length))
         spectral_features = np.array(spectral_features)
         print(f'Finished processing montage: {montage}, segment length: {segment_length}')
         # Save the features
@@ -50,10 +45,9 @@ for montage in montages:
     for segment_lenght in segment_lengths:
         print(f"Starting cwt - {montage} {segment_lenght}s")
         cwt_features = []     
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
-            cwt_features.append(yf.run_cwt_seg(data, Fs=FS, MONTAGE=montage,WAVELET_TYPE='morl' ,sec=segment_lenght))
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
+            cwt_features.append(yf.run_cwt_seg(sample, Fs=FS, MONTAGE=montage,WAVELET_TYPE='morl' ,sec=segment_lenght))
         cwt_features = np.array(cwt_features)
         print(f'Finished processing montage: {montage}, segment length: {segment_lenght}')
         # Save the features
@@ -63,10 +57,9 @@ for montage in montages:
     for segment_lenght in segment_lengths:
         print(f"Starting dwt - {montage} {segment_lenght}s")
         dwt_features = []
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
-            dwt_features.append(yf.run_dwt_seg(data, Fs=FS, MONTAGE=montage, WAVELET='db4', sec=segment_lenght))
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
+            dwt_features.append(yf.run_dwt_seg(sample, Fs=FS, MONTAGE=montage, WAVELET='db4', sec=segment_lenght))
         dwt_features = np.array(dwt_features)
         print(f'Finished processing montage: {montage}, segment length: {segment_lenght}')
         # Save the features
@@ -78,11 +71,10 @@ for montage in montages:
     for segment_lenght in segment_lengths:
         print(f"Starting mst - {montage} {segment_lenght}s")
         mst_features = []
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
-            mst_features.append(yf.run_mST_seg(data, Fs=FS, MONTAGE=montage, epoch_width=segment_lenght))
-        
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
+            mst_features.append(yf.run_mST_seg(sample, Fs=FS, MONTAGE=montage, epoch_width=segment_lenght))
+
         mst_features = np.array(mst_features)
         print(f'Finished {montage} {segment_lenght}s')
         print(f"Shape: {mst_features.shape}")
@@ -95,10 +87,9 @@ for montage in montages:
     for segment_lenght in segment_lengths:
         sst_features = []
         print(f"Starting sst - {montage} {segment_lenght}s")
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
-            sst_features.append(yf.run_sST_seg(data, Fs=FS, MONTAGE=montage, epoch_width=segment_lenght))
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
+            sst_features.append(yf.run_sST_seg(sample, Fs=FS, MONTAGE=montage, epoch_width=segment_lenght))
         sst_features = np.array(sst_features)
         print(f'Finished {montage} {segment_lenght}s')
         print(f"Shape: {sst_features.shape}")
@@ -111,10 +102,9 @@ for montage in montages:
     for segment_lenght in segment_lengths:
         print(f"Starting utm - {montage} {segment_lenght}s")
         utm_features = []
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
-            utm_features.append(yf.run_UTM_seg(data, Fs=FS, MONTAGE=montage, sec=segment_lenght))
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
+            utm_features.append(yf.run_UTM_seg(sample, Fs=FS, MONTAGE=montage, sec=segment_lenght))
 
         utm_features = np.array(utm_features)
         print(f'Finished {montage} {segment_lenght}s')
@@ -127,11 +117,10 @@ for montage in montages:
     for segment_lenght in segment_lengths:
         print(f"Starting plv - {montage} {segment_lenght}s")
         plv_features = []   
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
-            plv_features.append(yf.run_plv_seg(data, Fs=FS, MONTAGE=montage, sec=segment_lenght))
-        
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
+            plv_features.append(yf.run_plv_seg(sample, Fs=FS, MONTAGE=montage, sec=segment_lenght))
+
         plv_features = np.array(plv_features)
         print(f'Finished {montage} {segment_lenght}s')
         print(f"Shape: {plv_features.shape}")
@@ -143,11 +132,10 @@ for montage in montages:
     for segment_lenght in segment_lengths:
         print(f"Starting gplv - {montage} {segment_lenght}s")
         gplv_features = []
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
             with HiddenPrints():
-                gplv_features.append(yf.run_gplv_seg(data, Fs=FS, MONTAGE=montage, sec=segment_lenght))
+                gplv_features.append(yf.run_gplv_seg(sample, Fs=FS, MONTAGE=montage, sec=segment_lenght))
 
         gplv_features = np.array(gplv_features)
         print(f'Finished {montage} {segment_lenght}s')
@@ -160,10 +148,9 @@ for montage in montages:
     for segment_lenght in segment_lengths:
         print(f"Starting cc - {montage} {segment_lenght}s")
         cc_features = []         
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
-            cc_features.append(yf.run_cc_seg(data, Fs=FS, MONTAGE=montage, sec=segment_lenght))
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
+            cc_features.append(yf.run_cc_seg(sample, Fs=FS, MONTAGE=montage, sec=segment_lenght))
         
         cc_features = np.array(cc_features)
         print(f'Finished {montage} {segment_lenght}s')
@@ -175,12 +162,11 @@ for montage in montages:
 for montage in montages:
     for segment_lenght in segment_lengths:
         gcc_features = []
-        for index,sample in enumerate(stim_samples):
-            print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
+        for index,sample in enumerate(data):
+            print(f'Processing sample {index+1}/{len(data)}')
             with HiddenPrints():
-                gcc_features.append(yf.run_gcc_seg(data, Fs=FS, MONTAGE=montage, sec=segment_lenght))
-        
+                gcc_features.append(yf.run_gcc_seg(sample, Fs=FS, MONTAGE=montage, sec=segment_lenght))
+
         gcc_features = np.array(gcc_features)
         print(f'Finished {montage} {segment_lenght}s')
         print(f"Shape: {gcc_features.shape}")

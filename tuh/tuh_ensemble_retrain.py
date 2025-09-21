@@ -203,7 +203,8 @@ def generate_feature_combinations():
     combinations = []
     
     # Generate all combinations of 2 to len(feature_names) features
-    for i in range(2, len(feature_names) + 1):
+    # for i in range(2, len(feature_names) + 1):
+    for i in range(2,5):
         combs = list(itertools.combinations(feature_names, i))
         for comb in combs:
             combinations.append(list(comb))

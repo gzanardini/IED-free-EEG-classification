@@ -1,5 +1,4 @@
 import os
-from pytest import skip
 import wandb.plot
 from xgboost import XGBClassifier
 import numpy as np 
@@ -14,10 +13,11 @@ import cupy as cp
 from cupy.cuda import Device
 import random
 from joblib import Parallel, delayed
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as mp
 from scipy.optimize import minimize
 from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
 from sklearn.isotonic import IsotonicRegression
-
 
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -25,15 +25,16 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # Configuration
 N_RUNS = 5
 N_CUDA = 0
-DEVICE = 'cuda'
+DEVICE = 'cpu'
 SPLIT_RATIO = 0.3
 PROJECT_NAME = 'emc_ensemble_retrain'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 DATA_FOLDER = '/space/gzanardini/emc_whole/split'
 LOG_FOLDER = '/space/gzanardini/emc/'
-N_JOBS_XGB = 4  # Set to 1 for compatibility with CUDA
-NUM_WORKERS = 10  # Number of max parallel workers for training
+N_JOBS_XGB = 1  # Set to 1 for process-based parallelism
+NUM_WORKERS = min(mp.cpu_count() // 2, 8)  # Limit workers to avoid memory issues
 N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
+MAX_SUBJECT_WORKERS = 4  # Parallel subjects in LOSO CV
 SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
@@ -113,6 +114,14 @@ def log_probability_analysis(probs_dict, feature_names, stage_name, subject_id=N
         stage_name: String identifier for the stage (e.g., 'stage1_val', 'stage2_test')
         subject_id: Optional subject identifier for LOSO logging
     """
+    # Skip wandb logging if not in main process (for multiprocessing compatibility)
+    try:
+        import wandb
+        if not wandb.run:
+            return
+    except:
+        return
+        
     prefix = f"{stage_name}" 
 
     # Log histograms for each type of probability
@@ -210,30 +219,30 @@ def generate_feature_combinations():
     
     return combinations
 
-# Global variable to store preloaded data
-_feature_data_cache = {}
+# Global variable to store preloaded data (not used in optimized version)
+# _feature_data_cache = {}
 
-def preload_all_feature_data():
-    """Preload all feature data to avoid repeated loading."""
-    print("Preloading all feature data...")
-    global _feature_data_cache
-    
-    for feature_name in feature_names:
-        montage, segment_length, combiner = best_parameters[feature_name]
-        data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
-        data = np.load(data_path)
-        data = handle_complex_numbers(data)
-        
-        if len(data.shape) > 2:
-            data = data.reshape(data.shape[0], -1)
-        
-        # Convert to cupy array for GPU processing
-        _feature_data_cache[feature_name] = cp.array(data)
-        print(f"Loaded {feature_name}: {data.shape}")
+# def preload_all_feature_data():
+#     """Preload all feature data to avoid repeated loading."""
+#     print("Preloading all feature data...")
+#     global _feature_data_cache
+#     
+#     for feature_name in feature_names:
+#         montage, segment_length, combiner = best_parameters[feature_name]
+#         data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
+#         data = np.load(data_path)
+#         data = handle_complex_numbers(data)
+#         
+#         if len(data.shape) > 2:
+#             data = data.reshape(data.shape[0], -1)
+#         
+#         # Convert to cupy array for GPU processing
+#         _feature_data_cache[feature_name] = cp.array(data)
+#         print(f"Loaded {feature_name}: {data.shape}")
 
-def get_cached_feature_data(feature_name):
-    """Get preloaded feature data."""
-    return _feature_data_cache[feature_name]
+# def get_cached_feature_data(feature_name):
+#     """Get preloaded feature data."""
+#     return _feature_data_cache[feature_name]
 
 def train_feature_model_parallel(args):
     """Wrapper function for parallel feature model training."""
@@ -243,8 +252,14 @@ def train_feature_model_parallel(args):
     random.seed(seed)
     np.random.seed(seed)
     
-    # Get cached data instead of loading
-    data = get_cached_feature_data(feature_name)
+    # Load data in each process to avoid shared memory issues
+    montage, segment_length, combiner = best_parameters[feature_name]
+    data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
+    data = np.load(data_path)
+    data = handle_complex_numbers(data)
+    
+    if len(data.shape) > 2:
+        data = data.reshape(data.shape[0], -1)
     
     if retrain_on_trainval:
         # Second stage: Train on train+val data for final predictions
@@ -255,9 +270,9 @@ def train_feature_model_parallel(args):
         model = XGBClassifier(
             scale_pos_weight=ratio,
             n_jobs=N_JOBS_XGB,
-            device=DEVICE,
+            device='cpu',  # Force CPU for multiprocessing
             n_estimators=100,
-            seed=seed,
+            random_state=seed,
             max_depth=6,
             subsample=0.9,
             gamma=0.1,
@@ -271,7 +286,6 @@ def train_feature_model_parallel(args):
         return {
             'feature_name': feature_name,
             'test_probs': test_probs,
-            'model': model
         }
     else:
         # First stage: Train on train data, validate on val data
@@ -280,9 +294,9 @@ def train_feature_model_parallel(args):
         model = XGBClassifier(
             scale_pos_weight=ratio,
             n_jobs=N_JOBS_XGB,
-            device=DEVICE,
+            device='cpu',  # Force CPU for multiprocessing
             n_estimators=100,
-            seed=seed,
+            random_state=seed,
             max_depth=6,
             subsample=0.9,
             gamma=0.1,
@@ -313,16 +327,24 @@ def train_feature_model_parallel(args):
         }
 
 def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
-    """Train a model for a single feature using cached data."""
-    data = get_cached_feature_data(feature_name)
+    """Train a model for a single feature by loading data."""
+    # Load data instead of using cache
+    montage, segment_length, combiner = best_parameters[feature_name]
+    data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
+    data = np.load(data_path)
+    data = handle_complex_numbers(data)
+    
+    if len(data.shape) > 2:
+        data = data.reshape(data.shape[0], -1)
+    
     ratio = (len(y_train) - sum(y_train)) / sum(y_train)
     
     model = XGBClassifier(
         scale_pos_weight=ratio,
         n_jobs=N_JOBS_XGB,
-        device=DEVICE,
+        device='cpu',
         n_estimators=100,
-        seed=seed,
+        random_state=seed,
         max_depth=6,
         subsample=0.9,
         gamma=0.1,
@@ -363,10 +385,10 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         for i, feature_name in enumerate(feature_combination)
     ]
     
-    # Train feature models in parallel using joblib (thread-based for GPU compatibility)
-    feature_results_stage1 = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
-        delayed(train_feature_model_parallel)(args) for args in args_list_stage1
-    )
+    # Train feature models in parallel using ProcessPoolExecutor
+    max_workers = min(N_PARALLEL_FEATURES, len(feature_combination))
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        feature_results_stage1 = list(executor.map(train_feature_model_parallel, args_list_stage1))
     
     # Sort results to maintain order
     feature_models_stage1 = sorted(feature_results_stage1, key=lambda x: feature_combination.index(x['feature_name']))
@@ -413,17 +435,24 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'meta': meta_val_probs
     }
     
-    # Log Stage 1 analysis
-    #log_probability_analysis(stage1_probs, feature_combination, 'stage1_validation')
-    
-    # Log stage 1 specific metrics
-    wandb.log({
-        'stage1/auc': stage1_auc,
-        'stage1/bac': stage1_bac,
-        'stage1/bac80': stage1_bac80,
-        'stage1/weights': wandb.Histogram(w_simplex),
-        'stage1/meta_probs': wandb.Histogram(meta_val_probs)
-    })
+    # === STAGE 1 LOGGING - Only if wandb is available ===
+    # Only log if in main process with wandb initialized
+    try:
+        import wandb
+        if wandb.run:
+            # Log Stage 1 analysis
+            log_probability_analysis(stage1_probs, feature_combination, 'stage1_validation')
+            
+            # Log stage 1 specific metrics
+            wandb.log({
+                'stage1/auc': stage1_auc,
+                'stage1/bac': stage1_bac,
+                'stage1/bac80': stage1_bac80,
+                'stage1/weights': wandb.Histogram(w_simplex),
+                'stage1/meta_probs': wandb.Histogram(meta_val_probs)
+            })
+    except:
+        pass
     
     # STAGE 2: Retrain models on train+val data using learned weights, predict on test
     print(f"Stage 2: Retraining models on train+val data for final predictions...")
@@ -434,17 +463,17 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         for i, feature_name in enumerate(feature_combination)
     ]
     
-    # Retrain feature models on train+val data
-    feature_results_stage2 = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
-        delayed(train_feature_model_parallel)(args) for args in args_list_stage2
-    )
+    # Retrain feature models on train+val data using ProcessPoolExecutor
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        feature_results_stage2 = list(executor.map(train_feature_model_parallel, args_list_stage2))
     
     # Sort results to maintain order
     feature_models_stage2 = sorted(feature_results_stage2, key=lambda x: feature_combination.index(x['feature_name']))
     
     # Remove feature_name from results as it's not needed anymore
     for model in feature_models_stage2:
-        del model['feature_name']
+        if 'feature_name' in model:
+            del model['feature_name']
     
     # Stack test probabilities and apply calibrators
     test_probs_list = [model['test_probs'] for model in feature_models_stage2]
@@ -467,7 +496,7 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     
     print(f"Stage 2 - Final predictions generated using learned weights")
     
-    # === STAGE 2 LOGGING ===
+    # === STAGE 2 LOGGING - Only if wandb is available ===
     # Prepare probability data for logging
     raw_test_probs = np.column_stack(test_probs_list)
     calibrated_test_probs_matrix = np.column_stack(calibrated_test_probs)
@@ -480,8 +509,21 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'meta': meta_test_probs
     }
     
-    # Log Stage 2 analysis
-    #log_probability_analysis(stage2_probs, feature_combination, 'stage2_test')
+    # Only log if in main process with wandb initialized
+    try:
+        import wandb
+        if wandb.run:
+            # Log Stage 2 analysis
+            log_probability_analysis(stage2_probs, feature_combination, 'stage2_test')
+            
+            # Log stage 2 specific metrics
+            wandb.log({
+                'stage2/meta_probs': wandb.Histogram(meta_test_probs),
+                'stage2/meta_preds': wandb.Histogram(meta_test_preds),
+                'stage2/opt_threshold': opt_threshold
+            })
+    except:
+        pass
     
     return {
         'feature_models': feature_models_stage2,  # Final retrained models
@@ -497,6 +539,35 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'lr_weights': meta_model.coef_[0],
     }
 
+def process_subject_loso(args):
+    """Process a single subject in LOSO CV."""
+    subject, combination, description_dict, labels, seed = args
+    
+    # Reconstruct description DataFrame from dict
+    description = pd.DataFrame(description_dict)
+    
+    # Get train/val/test indices for this subject
+    train_idxs, val_idxs, test_idxs = get_train_val_test_indices(
+        description, labels, subject, seed
+    )
+    
+    y_train = labels[train_idxs]
+    y_val = labels[val_idxs] 
+    y_test = labels[test_idxs]
+    
+    # Train ensemble models for this subject
+    ensemble_result = train_ensemble_models(
+        combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed
+    )
+    
+    return {
+        'subject': subject,
+        'y_test': y_test,
+        'test_preds': ensemble_result['test_preds'],
+        'test_probs': ensemble_result['test_probs'],
+        'ensemble_result': ensemble_result
+    }
+
 def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
     """Save results to CSV files."""
     os.makedirs(f'{LOG_FOLDER}/{PROJECT_NAME}', exist_ok=True)
@@ -504,12 +575,12 @@ def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
     predictions_df.to_csv(f'{LOG_FOLDER}/{PROJECT_NAME}/{RUN_NAME}_run_{run_n}_predictions_seed_{seed}.csv', index=False)
 
 def main():
-    """Main execution function with data preloading."""
+    """Main execution function with parallelized LOSO CV."""
     setup_environment()
     description, labels, subjects, unique_subjects, subject_labels = load_data()
     
-    # Preload all feature data once
-    preload_all_feature_data()
+    # Don't preload data - each process will load what it needs
+    # preload_all_feature_data()
 
     checkpoint=False
     
@@ -517,7 +588,7 @@ def main():
     all_combinations = generate_feature_combinations()
     print(f"Generated {len(all_combinations)} feature combinations to evaluate")
     
-    # Evaluate each feature combination
+        # Evaluate each feature combination
     for combination in all_combinations:
         for run_n in range(N_RUNS):
 
@@ -527,20 +598,26 @@ def main():
             seed = secrets.randbelow(5000)
             random.seed(seed)
             np.random.seed(seed)
-            cp.random.seed(seed)
+            # Remove cupy random seed since we're using CPU only
+            # cp.random.seed(seed)
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
             if not checkpoint:
-                if RUN_NAME == 'cc+cwt+dwt+plv+mst+sst+gcc+gplv_run_3' :    #   for length 5 if crashes -> 'cc+cwt+utm+gcc+gplv_run_3'
+                if RUN_NAME == 'cwt+mst+sst+utm+gcc+gplv_run_3' :    #   for length 5 if crashes -> 'cc+cwt+utm+gcc+gplv_run_3'
                     checkpoint = True
                     print(f"Reached checkpoint: {RUN_NAME}, continuing with this and remaining runs...")
                 else:
                     print(f"Skipping run {RUN_NAME} (before checkpoint)...")
                     continue
 
-            if os.path.exists(f'{LOG_FOLDER}/{PROJECT_NAME}/{RUN_NAME}_run_{run_n}_results_seed_{seed}.csv'): # Checkpointing
-                    print(f"Results for {RUN_NAME} already exist, skipping...")
-                    continue
+            skip_flag = False
+            for existing_run in wandb.Api(timeout=99).runs(path=PROJECT_NAME):
+                if existing_run.name == RUN_NAME:
+                    print(f"Run {RUN_NAME} already exists, skipping...")
+                    skip_flag = True
+                    break
+            if skip_flag:
+                continue
 
             wandb.init(project=PROJECT_NAME, name=RUN_NAME, dir=LOG_FOLDER)
 
@@ -550,44 +627,44 @@ def main():
         
             print(f'RUN {run_n+1}/{N_RUNS} - Seed: {seed}')
             
-            # Initialize arrays to store predictions for this combination
+            # Parallelize LOSO CV at subject level
+            description_dict = description.to_dict('records')  # Convert to dict for multiprocessing
+            subject_args = [
+                (subject, combination, description_dict, labels, seed) 
+                for subject in unique_subjects
+            ]
+            
+            print(f"Processing {len(unique_subjects)} subjects in parallel...")
+            
+            # Use fewer workers for subject-level parallelism to avoid memory issues
+            max_subject_workers = min(MAX_SUBJECT_WORKERS, len(unique_subjects))
+            
+            with ProcessPoolExecutor(max_workers=max_subject_workers) as executor:
+                subject_results = list(executor.map(process_subject_loso, subject_args))
+            
+            # Collect all predictions
             y_true_all = []
             y_pred_all = []
             y_prob_all = []
             subject_ids = []
-                      
-            # Iterate through all subjects (LOSO)
-            for subject in unique_subjects:
+            
+            for result in subject_results:
+                y_true_all.extend(result['y_test'])
+                y_pred_all.extend(result['test_preds'])
+                y_prob_all.extend(result['test_probs'])
+                subject_ids.extend([result['subject']] * len(result['y_test']))
                 
-                # Leave current subject out for testing
-                train_idxs, val_idxs, test_idxs = get_train_val_test_indices(
-                    description, labels, subject, seed
-                )
-                
-                y_train = labels[train_idxs]
-                y_val = labels[val_idxs]
-                y_test = labels[test_idxs]
-                
-                # Train ensemble models for this feature combination (now with parallelization)
-                ensemble_result = train_ensemble_models(
-                    combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed
-                )
-
+                # Log individual subject results
+                ensemble_result = result['ensemble_result']
                 wandb.log({
                     'validation/bac80:': ensemble_result['bac80'],
                     'validation/auc': ensemble_result['auc'],
                     'validation/bac': ensemble_result['bac'],
+                    'validation/opt_threshold': ensemble_result['opt_threshold'],
                     'validation/weights': wandb.Histogram(ensemble_result['lr_weights'])
                 })
-
-                print(f'LR Weights: {ensemble_result["lr_weights"]}')
-                
-                # Store predictions for this subject
-                y_true_all.extend(y_test)
-                y_pred_all.extend(ensemble_result['test_preds'])
-                y_prob_all.extend(ensemble_result['test_probs'])
-                subject_ids.extend([subject] * len(y_test))
-                
+                print(f'Subject {result["subject"]} - LR Weights: {ensemble_result["lr_weights"]}')
+            
             # After LOSO CV is complete for this combination, calculate overall metrics
             print(f"LOSO CV complete for combination: {combination_name}, calculating metrics...")
             
@@ -620,6 +697,7 @@ def main():
             
             auprc = auc_sklearn(r, p)
             ap = average_precision_score(y_true_all, y_prob_all)
+
 
             wandb.log({
                 'auc': auc,
@@ -666,4 +744,6 @@ def main():
             print(f"Run {RUN_NAME} completed successfully.")
 
 if __name__ == "__main__":
+    # Set multiprocessing start method for compatibility
+    mp.set_start_method('spawn', force=True)
     main()
