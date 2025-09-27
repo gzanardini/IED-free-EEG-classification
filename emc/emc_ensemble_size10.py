@@ -27,7 +27,7 @@ N_RUNS = 5
 N_CUDA = 0
 DEVICE = 'cuda'
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'emc_ensemble_retrain'
+PROJECT_NAME = 'emc_size10'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 DATA_FOLDER = '/space/gzanardini/emc_whole/split'
 LOG_FOLDER = '/space/gzanardini/emc/'
@@ -54,7 +54,7 @@ best_parameters = {
     'utm':      ('Laplacian',   20,     'std')
 }
 
-def train_simplex_logistic(X, y, max_iter=2500, alpha=1):
+def train_simplex_logistic(X, y, max_iter=2500):
 
     d = X.shape[1]
     init_w = np.full(d, 1.0/d)                # uniform start
@@ -64,7 +64,7 @@ def train_simplex_logistic(X, y, max_iter=2500, alpha=1):
         logits = X @ w
         ce = -np.sum(y * np.log(expit(logits)) +
                      (1 - y) * np.log(1 - expit(logits)))
-       # α = 1 is uniform prior; α > 1 discourages zeros
+        alpha = 1      # α = 1 is uniform prior; α > 1 discourages zeros
         dirichlet_pen = (alpha - 1) * -np.sum(np.log(w + 1e-12))
         return ce + dirichlet_pen
 
@@ -201,9 +201,9 @@ def get_train_val_test_indices(description, labels, subject, seed):
 def generate_feature_combinations():
     """Generate combinations of features from 2 to all features."""
     combinations = []
-    
-    # Generate all combinations of 2 to len(feature_names) features
-    for i in range(4, len(feature_names) + 1):
+
+    # Generate all combinations of 10 to len(feature_names) features
+    for i in range(10, len(feature_names) + 1):
         combs = list(itertools.combinations(feature_names, i))
         for comb in combs:
             combinations.append(list(comb))
@@ -417,13 +417,7 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     #log_probability_analysis(stage1_probs, feature_combination, 'stage1_validation')
     
     # Log stage 1 specific metrics
-    # wandb.log({
-    #     'stage1/auc': stage1_auc,
-    #     'stage1/bac': stage1_bac,
-    #     'stage1/bac80': stage1_bac80,
-    #     'stage1/weights': wandb.Histogram(w_simplex),
-    #     'stage1/meta_probs': wandb.Histogram(meta_val_probs)
-    # })
+
     
     # STAGE 2: Retrain models on train+val data using learned weights, predict on test
     print(f"Stage 2: Retraining models on train+val data for final predictions...")

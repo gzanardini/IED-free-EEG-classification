@@ -599,7 +599,7 @@ def main():
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
             if not checkpoint:
-                if RUN_NAME == 'cc+dwt+plv+spectral_run_2' :    #   for length 5 if crashes -> 'cc+cwt+utm+gcc+gplv_run_3'
+                if RUN_NAME == 'cwt+dwt+plv+mst+gplv_run_2' :    #   for length 5 if crashes -> 'cc+cwt+utm+gcc+gplv_run_3'
                     checkpoint = True
                     print(f"Reached checkpoint: {RUN_NAME}, continuing with this and remaining runs...")
                 else:
