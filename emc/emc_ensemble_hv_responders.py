@@ -1,5 +1,4 @@
 import os
-from pytest import skip
 import wandb.plot
 from xgboost import XGBClassifier
 import numpy as np 
@@ -18,7 +17,6 @@ from scipy.optimize import minimize
 from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
 from sklearn.isotonic import IsotonicRegression
 
-
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -27,34 +25,31 @@ N_RUNS = 5
 N_CUDA = 0
 DEVICE = 'cuda'
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'emc_size10'
+PROJECT_NAME = 'emc_ensemble_hv_responders'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
-DATA_FOLDER = '/space/gzanardini/emc_whole/split'
+DATA_FOLDER = '/space/gzanardini/emc_hv/'
 LOG_FOLDER = '/space/gzanardini/emc/'
 N_JOBS_XGB = 4  # Set to 1 for compatibility with CUDA
 NUM_WORKERS = 10  # Number of max parallel workers for training
 N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
 SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
 
-montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
-segment_lengths = [1, 2, 5, 10, 20, 60]
-feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gcc', 'gplv']
-combiners = ['mean', 'median', 'std', 'skew', 'kurt']
+feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'sr', 'utm', 'gcc', 'gplv']
 
 best_parameters = {
-    'spectral': ('Cz',          10 ,    'std'),
-    'cwt':      ('BipolarDB',   2,      'median'),
-    'dwt':      ('Laplacian',   10,     'median'),
-    'mst':      ('BipolarDB',   60,     'median'),
-    'sst':      ('CAR',         10,     'median'),
-    'cc':       ('CAR',         1,      'std'),
-    'plv':      ('Laplacian',   60,      'kurt'),
-    'gcc':      ('CAR',         60,      'median'),
-    'gplv':     ('Laplacian',   2,      'std'),
-    'utm':      ('Laplacian',   20,     'std')
+    'sr':       ('BipolarDB',          60 ,    'skew'),
+    'cwt':      ('CAR',   2,      'median'),
+    'dwt':      ('Laplacian',   60,     'std'),
+    'mst':      ('BipolarDB',   60,     'kurtosis'),
+    'sst':      ('BipolarDB',   60,     'kurtosis'),
+    'cc':       ('Laplacian',   60,      'std'),
+    'plv':      ('CAR',   60,      'skew'),
+    'gcc':      ('BipolarDB',         10,      'skew'),
+    'gplv':     ('BipolarDB',   2,      'kurt'),
+    'utm':      ('Cz',   10,     'kurt')
 }
 
-def train_simplex_logistic(X, y, max_iter=2500):
+def train_simplex_logistic(X, y, max_iter=2500, alpha=1.05):
 
     d = X.shape[1]
     init_w = np.full(d, 1.0/d)                # uniform start
@@ -64,7 +59,7 @@ def train_simplex_logistic(X, y, max_iter=2500):
         logits = X @ w
         ce = -np.sum(y * np.log(expit(logits)) +
                      (1 - y) * np.log(1 - expit(logits)))
-        alpha = 1      # α = 1 is uniform prior; α > 1 discourages zeros
+       # α = 1 is uniform prior; α > 1 discourages zeros
         dirichlet_pen = (alpha - 1) * -np.sum(np.log(w + 1e-12))
         return ce + dirichlet_pen
 
@@ -180,9 +175,17 @@ def load_feature_data(feature_name):
 
 def get_train_val_test_indices(description, labels, subject, seed):
     """Get indices for train/validation/test splits for LOSO CV."""
+    # Load HV responders and filter for only positive responders
+    hv_responders = pd.read_csv('/users/gzanardini/eeg_thesis/emc/hv_responders.csv')
+    responder_subjects = set(hv_responders[hv_responders['hv_success'] == 1]['subject'].values)
+    
     test_idxs = np.where(description['subject'] == subject)[0]
     subjects = description['subject']
     unique_subjects = np.unique(subjects)
+    
+    # Filter to only include HV responders
+    unique_subjects = np.array([subj for subj in unique_subjects if subj in responder_subjects])
+    
     other_subjects = [subj for subj in unique_subjects if subj != subject]
     other_subjects_labels = np.array([[subj, labels[subjects == subj][0]] for subj in other_subjects])
     
@@ -201,9 +204,9 @@ def get_train_val_test_indices(description, labels, subject, seed):
 def generate_feature_combinations():
     """Generate combinations of features from 2 to all features."""
     combinations = []
-
-    # Generate all combinations of 10 to len(feature_names) features
-    for i in range(10, len(feature_names) + 1):
+    
+    # Generate all combinations of 2 to len(feature_names) features
+    for i in range(2, len(feature_names) + 1):
         combs = list(itertools.combinations(feature_names, i))
         for comb in combs:
             combinations.append(list(comb))
@@ -220,7 +223,7 @@ def preload_all_feature_data():
     
     for feature_name in feature_names:
         montage, segment_length, combiner = best_parameters[feature_name]
-        data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
+        data_path = f'{DATA_FOLDER}{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
         data = np.load(data_path)
         data = handle_complex_numbers(data)
         
@@ -417,7 +420,13 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     #log_probability_analysis(stage1_probs, feature_combination, 'stage1_validation')
     
     # Log stage 1 specific metrics
-
+    # wandb.log({
+    #     'stage1/auc': stage1_auc,
+    #     'stage1/bac': stage1_bac,
+    #     'stage1/bac80': stage1_bac80,
+    #     'stage1/weights': wandb.Histogram(w_simplex),
+    #     'stage1/meta_probs': wandb.Histogram(meta_val_probs)
+    # })
     
     # STAGE 2: Retrain models on train+val data using learned weights, predict on test
     print(f"Stage 2: Retraining models on train+val data for final predictions...")
@@ -525,23 +534,28 @@ def main():
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
             if not checkpoint:
-                if RUN_NAME == 'cc+cwt+dwt+plv+mst+sst+gcc+gplv_run_3' :    #   for length 5 if crashes -> 'cc+cwt+utm+gcc+gplv_run_3'
+                if RUN_NAME == 'dwt+plv+mst+sst+sr+gplv_run_4' :    #   
                     checkpoint = True
                     print(f"Reached checkpoint: {RUN_NAME}, continuing with this and remaining runs...")
                 else:
                     print(f"Skipping run {RUN_NAME} (before checkpoint)...")
                     continue
-
-            if os.path.exists(f'{LOG_FOLDER}/{PROJECT_NAME}/{RUN_NAME}_run_{run_n}_results_seed_{seed}.csv'): # Checkpointing
-                    print(f"Results for {RUN_NAME} already exist, skipping...")
-                    continue
+            
+            # # Skip run if it already exists in wandb with timeout
+            # try:
+            #     api = wandb.Api(timeout=200)
+            #     runs = api.runs(f"{wandb.config.entity}/{PROJECT_NAME}")
+            #     if any(run.name == RUN_NAME for run in runs):
+            #         print(f"Run {RUN_NAME} already exists in wandb, skipping...")
+            #         continue
+            # except Exception as e:
+            #     print(f"Could not check wandb API: {e}")
 
             wandb.init(project=PROJECT_NAME, name=RUN_NAME, dir=LOG_FOLDER)
 
             wandb.config.seed = seed
             wandb.config.combination_length = len(combination)
             wandb.config.combination_name = combination_name
-        
             print(f'RUN {run_n+1}/{N_RUNS} - Seed: {seed}')
             
             # Initialize arrays to store predictions for this combination

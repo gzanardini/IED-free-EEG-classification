@@ -20,9 +20,9 @@ PROJECT_NAME = 'emc_hypervent'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 LOG_FOLDER = '/space/gzanardini/emc/'
 
-montages =['Laplacian', 'CAR', 'Cz'] #['CAR', 'Cz', 'BipolarDB', 'Laplacian'] #removed bipolar
+montages =['BipolarDB'] #['Laplacian', 'CAR', 'Cz'] #['CAR', 'Cz', 'BipolarDB', 'Laplacian'] #removed bipolar
 segment_lengths = [2, 5, 10, 20, 60, 120] # removed 1 
-feature_names =['plv'] #['cc','cwt','dwt', 'gcc', 'gplv','utm', 'mst', 'sst', 'sa', 'sr'] # added sa and sr # no 'plv' for now
+feature_names = ['cc','cwt','dwt', 'gcc','plv','gplv','utm', 'mst', 'sst', 'sa', 'sr'] # added sa and sr # no 'plv' for now
 combiners=['mean', 'median', 'std', 'skew', 'kurt']
 
 def setup_environment():
