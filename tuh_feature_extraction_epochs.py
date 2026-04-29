@@ -4,7 +4,6 @@ import sys
 import numpy as np
 from utils import yash_features as yf
 import pickle as pkl
-import mne
 import pandas as pd
 
 class HiddenPrints:

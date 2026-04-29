@@ -3,6 +3,7 @@ import wandb.plot
 from xgboost import XGBClassifier
 import numpy as np 
 import pandas as pd
+from prediction_logging import build_predictions_df
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score
 import itertools 
 import secrets
@@ -15,15 +16,13 @@ N_CUDA = 2
 N_JOBS_XGB = 4
 DATA_FOLDER = '/space/gzanardini/tuh_epoched/split/'
 LOG_FOLDER = '/space/gzanardini/tuh/'
-PROJECT_NAME = 'tuh_singleset_noied_final'
+PROJECT_NAME = 'tuh_singleset_final'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 segment_lengths = [1, 2, 5, 10]
 feature_names = ['cc', 'cwt', 'dwt', 'gcc', 'gplv', 'plv', 'mst', 'sst', 'spectral', 'utm']
 combiners = ['mean', 'median', 'std', 'skew', 'kurt']
-subject_to_skip = ['aaaaajgj', 'aaaaakcd']
-
 
 def setup_environment():
     """Initialize CUDA and wandb."""
@@ -136,11 +135,11 @@ def save_predictions(y_tests, y_preds, y_scores, montage, feature_name, segment_
     os.makedirs(output_dir, exist_ok=True)
     
     # Create a DataFrame with the predictions
-    predictions_df = pd.DataFrame({
-        'y_true': y_tests,
-        'y_pred': y_preds,
-        'y_prob': y_scores
-    })
+    predictions_df = build_predictions_df(
+        y_test=y_tests,
+        y_pred=y_preds,
+        y_prob=y_scores
+    )
     
     # Save to CSV
     suffix = '_subjects' if subjects else ''
@@ -222,12 +221,6 @@ def main():
     """Main execution function."""
     setup_environment()
     description, labels, subjects, unique_subjects, subject_labels = load_data()
-
-    for subj in subject_to_skip:
-        idx = np.where(unique_subjects == subj)[0]
-        if len(idx) > 0:
-            unique_subjects = np.delete(unique_subjects, idx)
-            print(f'Skipping subject {subj} --- CONTAINS IEDs')
     
     for montage, feature_name, segment_length, combiner in itertools.product(montages, feature_names, segment_lengths, combiners):
         features = load_feature_data(feature_name, montage, segment_length, combiner)

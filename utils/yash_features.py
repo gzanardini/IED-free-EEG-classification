@@ -1406,9 +1406,6 @@ def discrete_hilbert(x, DBplot=False):
     x_hilb = np.fft.ifft(np.fft.fft(x) * H)
     x_hilb = np.real(x_hilb)
 
-    if DBplot:
-        plt.figure(10, clear=True)
-        plt.plot(np.imag(H))
 
     return(x_hilb)
 

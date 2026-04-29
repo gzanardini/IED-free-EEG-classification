@@ -3,6 +3,7 @@ import wandb.plot
 from xgboost import XGBClassifier
 import numpy as np 
 import pandas as pd
+from prediction_logging import build_predictions_df
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score
 import itertools 
 import secrets
@@ -11,19 +12,24 @@ import warnings
 import cupy as cp
 from cupy.cuda import Device
 import random
+from joblib import Parallel, delayed
+from scipy.optimize import minimize
+from scipy.special import expit, logit          # σ(x) = 1 / (1+e^{-x})
 
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
-
 # Configuration
 N_RUNS = 5
 N_CUDA = 0
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'tuh_concat'
+PROJECT_NAME = 'tuh_ensemble_bucket'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 DATA_FOLDER = '/space/gzanardini/tuh_whole/split'
 LOG_FOLDER = '/space/gzanardini/tuh/'
-N_JOBS_XGB = 16
+N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
+NUM_WORKERS = 16  # Number of parallel workers for training
+N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
+SCIPY_ARRAY_API=1
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 segment_lengths = [1, 2, 5, 10, 20, 60]
@@ -42,6 +48,53 @@ best_parameters = {
     'gplv': ('BipolarDB', 1, 'mean'),
     'utm': ('Laplacian', 60, 'mean')
 }
+
+def train_simplex_logistic(X, y, max_iter=2500):
+    """
+    Fit a bias-free logistic model with weights on the probability simplex.
+
+    Args
+    ----
+    X : (n_samples, n_models) validation probabilities of the base models
+    y : (n_samples,)           0/1 labels
+    Returns
+    -------
+    w : (n_models,) positive weights summing to 1
+    """
+    d = X.shape[1]
+    init_w = np.full(d, 1.0/d)                # uniform start
+
+    # negative log-likelihood  (bias = 0)
+    def nll(w):
+        logits = X @ w
+        ce = -np.sum(y * np.log(expit(logits)) +
+                     (1 - y) * np.log(1 - expit(logits)))
+        alpha = 1        # α = 1 is uniform prior; α > 1 discourages zeros
+
+        dirichlet_pen = (alpha - 1) * -np.sum(np.log(w + 1e-12))
+        return ce + dirichlet_pen
+
+    bounds      = [(0.0, None)] * d             # w_i ≥ 0
+    constraints = {'type': 'eq',
+                   'fun': lambda w: np.sum(w) - 1}
+
+    res = minimize(nll, init_w, method='SLSQP',
+                   bounds=bounds,
+                   constraints=constraints,
+                   options={'maxiter': max_iter})
+
+    if not res.success:
+        raise RuntimeError("Simplex LR did not converge: " + res.message)
+
+    return res.x
+
+class SimplexLogistic:
+    """Tiny wrapper so the rest of the pipeline keeps working."""
+    def __init__(self, w):
+        self.coef_  = w[None, :]              # scikit style (1, d)
+    def predict_proba(self, X):
+        p = expit(X @ self.coef_.ravel())
+        return np.column_stack([1-p, p])
 
 def setup_environment():
     """Initialize CUDA and wandb."""
@@ -102,7 +155,7 @@ def load_feature_data(feature_name):
     
     if len(data.shape) > 2:
         data = data.reshape(data.shape[0], -1)
-    return data, montage, segment_length, combiner
+    return cp.array(data), montage, segment_length, combiner
 
 def get_train_val_test_indices(description, labels, subject, seed):
     """Get indices for train/validation/test splits for LOSO CV."""
@@ -153,43 +206,67 @@ def preload_all_feature_data():
         if len(data.shape) > 2:
             data = data.reshape(data.shape[0], -1)
         
-        # Store as numpy array (no need for GPU for concatenation)
-        _feature_data_cache[feature_name] = data
+        # Convert to cupy array for GPU processing
+        _feature_data_cache[feature_name] = cp.array(data)
         print(f"Loaded {feature_name}: {data.shape}")
 
 def get_cached_feature_data(feature_name):
     """Get preloaded feature data."""
     return _feature_data_cache[feature_name]
 
-def concatenate_features(feature_combination):
-    """Concatenate multiple feature sets along axis 1."""
-    feature_arrays = []
+def train_feature_model_parallel(args):
+    """Wrapper function for parallel feature model training."""
+    feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed = args
     
-    for feature_name in feature_combination:
-        data = get_cached_feature_data(feature_name)
-        feature_arrays.append(data)
+    # Set random seeds for this process
+    random.seed(seed)
+    np.random.seed(seed)
     
-    # Concatenate along axis 1 (features)
-    concatenated_features = np.concatenate(feature_arrays, axis=1)
+    # Get cached data instead of loading
+    data = get_cached_feature_data(feature_name)
     
-    # Handle any remaining NaN values by replacing with 0
-    concatenated_features = np.nan_to_num(concatenated_features, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    return concatenated_features
-
-def train_concatenated_model(feature_combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
-    """Train a single model on concatenated features."""
-    
-    # Concatenate features for this combination
-    X_concat = concatenate_features(feature_combination)
-    
-    # Convert to cupy for GPU processing
-    X_concat_gpu = cp.array(X_concat)
-    
-    # Calculate class weights
     ratio = (len(y_train) - sum(y_train)) / sum(y_train)
     
-    # Train XGBoost model
+    model = XGBClassifier(
+        scale_pos_weight=ratio,
+        n_jobs=1,  # Keep this as 1 since we're parallelizing at higher level
+        device=f'cuda:{N_CUDA}',
+        n_estimators=100,
+        seed=seed,
+        max_depth=6,
+        subsample=0.9,
+        gamma=0.1,
+        learning_rate=0.01
+    )
+    model.fit(data[train_idxs], y_train)
+    
+    # Generate predictions
+    train_probs = model.predict_proba(data[train_idxs])[:, 1]
+    val_probs = model.predict_proba(data[val_idxs])[:, 1]
+    test_probs = model.predict_proba(data[test_idxs])[:, 1]
+    
+    # Calculate metrics
+    auc = roc_auc_score(y_val, val_probs)
+    bac = balanced_accuracy_score(y_val, val_probs >= 0.5)
+    bac80, _, _, _ = calculate_bac(y_val, val_probs, 0.8)
+    score = auc + bac
+        
+    return {
+        'feature_name': feature_name,
+        'train_probs': train_probs,
+        'val_probs': val_probs,
+        'test_probs': test_probs,
+        'auc': auc,
+        'bac': bac,
+        'bac80': bac80,
+        'score': score
+    }
+
+def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
+    """Train a model for a single feature using cached data."""
+    data = get_cached_feature_data(feature_name)
+    ratio = (len(y_train) - sum(y_train)) / sum(y_train)
+    
     model = XGBClassifier(
         scale_pos_weight=ratio,
         n_jobs=N_JOBS_XGB,
@@ -201,44 +278,92 @@ def train_concatenated_model(feature_combination, train_idxs, val_idxs, test_idx
         gamma=0.1,
         learning_rate=0.01
     )
-    
-    model.fit(X_concat_gpu[train_idxs], y_train)
+    model.fit(data[train_idxs], y_train)
     
     # Generate predictions
-    val_probs = model.predict_proba(X_concat_gpu[val_idxs])[:, 1]
-    test_probs = model.predict_proba(X_concat_gpu[test_idxs])[:, 1]
+    train_probs = model.predict_proba(data[train_idxs])[:, 1]
+    val_probs = model.predict_proba(data[val_idxs])[:, 1]
+    test_probs = model.predict_proba(data[test_idxs])[:, 1]
     
-    # Calculate metrics on validation set
+    # Calculate metrics
     auc = roc_auc_score(y_val, val_probs)
     bac = balanced_accuracy_score(y_val, val_probs >= 0.5)
     bac80, _, _, _ = calculate_bac(y_val, val_probs, 0.8)
-    
-    # Find optimal threshold on validation set
-    opt_threshold = find_optimal_threshold(y_val, val_probs)
-    
-    # Apply optimal threshold to test predictions
-    test_preds = (test_probs >= opt_threshold).astype(int)
-    
+    score = auc + bac
+        
     return {
-        'model': model,
+        'train_probs': train_probs,
         'val_probs': val_probs,
         'test_probs': test_probs,
-        'test_preds': test_preds,
+        'auc': auc,
+        'bac': bac,
+        'bac80': bac80,
+        'score': score
+    }
+
+def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
+    """Train models for a combination of features in parallel and create an ensemble."""
+    
+    # Use parallel training if combination has multiple features
+    # Prepare arguments for parallel processing
+    args_list = [
+        (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i)
+        for i, feature_name in enumerate(feature_combination)
+    ]
+    
+    # Train feature models in parallel using joblib (thread-based for GPU compatibility)
+    feature_results = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
+        delayed(train_feature_model_parallel)(args) for args in args_list
+    )
+    
+    # Sort results to maintain order
+    feature_models = sorted(feature_results, key=lambda x: feature_combination.index(x['feature_name']))
+    
+    # Remove feature_name from results as it's not needed anymore
+    for model in feature_models:
+        del model['feature_name']
+    
+    # Get logits from probabilities for each model
+    # Using logit function: log(p/(1-p)) which is the inverse of sigmoid
+    X_meta_val = np.column_stack([logit(np.clip(model['val_probs'], 0.001, 0.999)) for model in feature_models])
+    X_meta_test = np.column_stack([logit(np.clip(model['test_probs'], 0.001, 0.999)) for model in feature_models])
+
+    # Train simplex logistic regression meta-model
+    w_simplex = train_simplex_logistic(X_meta_val, y_val)
+    meta_model = SimplexLogistic(w_simplex)
+
+    # Generate test predictions
+    meta_val_probs = meta_model.predict_proba(X_meta_val)[:, 1]
+    meta_test_probs = meta_model.predict_proba(X_meta_test)[:, 1]
+    
+    # Calculate metrics
+    auc = roc_auc_score(y_val, meta_val_probs)
+    bac = balanced_accuracy_score(y_val, meta_val_probs >= 0.5)
+    bac80, _, _, _ = calculate_bac(y_val, meta_val_probs, 0.8)
+    
+    opt_threshold = find_optimal_threshold(y_val, meta_val_probs)
+    meta_test_preds = (meta_test_probs >= opt_threshold).astype(int)
+    return {
+        'feature_models': feature_models,
+        'meta_model': meta_model,
+        'val_probs': meta_val_probs,
+        'test_probs': meta_test_probs,
+        'test_preds': meta_test_preds,
         'opt_threshold': opt_threshold,
         'auc': auc,
         'bac': bac,
         'bac80': bac80,
-        'n_features': X_concat.shape[1]
+        'lr_weights': meta_model.coef_[0],
     }
 
-def save_results(results_df, predictions_df, RUN_NAME, run_n, seed):
+def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
     """Save results to CSV files."""
     os.makedirs(f'{LOG_FOLDER}/{PROJECT_NAME}', exist_ok=True)
     results_df.to_csv(f'{LOG_FOLDER}/{PROJECT_NAME}/{RUN_NAME}_run_{run_n}_results_seed_{seed}.csv', index=False)
     predictions_df.to_csv(f'{LOG_FOLDER}/{PROJECT_NAME}/{RUN_NAME}_run_{run_n}_predictions_seed_{seed}.csv', index=False)
 
 def main():
-    """Main execution function with concatenated features."""
+    """Main execution function with data preloading."""
     setup_environment()
     description, labels, subjects, unique_subjects, subject_labels = load_data()
     
@@ -249,7 +374,7 @@ def main():
     all_combinations = generate_feature_combinations()
     print(f"Generated {len(all_combinations)} feature combinations to evaluate")
     
-    # Evaluate each feature combination
+        # Evaluate each feature combination
     for combination in all_combinations:
         for run_n in range(N_RUNS):
 
@@ -262,6 +387,17 @@ def main():
             cp.random.seed(seed)
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
+            # check if project exists 
+  
+
+            # skip_flag = False
+            # for existing_run in wandb.Api().runs(path=PROJECT_NAME):
+            #     if existing_run.name == RUN_NAME:
+            #         print(f"Run {RUN_NAME} already exists, skipping...")
+            #         skip_flag = True
+            #         break
+            # if skip_flag:
+            #     continue
             
             wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True)
 
@@ -270,6 +406,7 @@ def main():
             wandb.config.combination_name = combination_name
         
             print(f'RUN {run_n+1}/{N_RUNS} - Seed: {seed}')
+            print(f"Using parallel training for {len(combination)} features with {min(N_PARALLEL_FEATURES, len(combination))} workers")
             
             # Initialize arrays to store predictions for this combination
             y_true_all = []
@@ -293,26 +430,24 @@ def main():
                 y_val = labels[val_idxs]
                 y_test = labels[test_idxs]
                 
-                # Train concatenated model for this feature combination
-                model_result = train_concatenated_model(
+                # Train ensemble models for this feature combination (now with parallelization)
+                ensemble_result = train_ensemble_models(
                     combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed
                 )
 
                 wandb.log({
-                    'validation/bac80': model_result['bac80'],
-                    'validation/auc': model_result['auc'],
-                    'validation/bac': model_result['bac'],
-                    'validation/opt_threshold': model_result['opt_threshold'],
-                    'n_features': model_result['n_features']
+                    'validation/bac80:': ensemble_result['bac80'],
+                    'validation/auc': ensemble_result['auc'],
+                    'validation/bac': ensemble_result['bac'],
+                    'validation/opt_threshold': ensemble_result['opt_threshold'],
                 })
 
-                print(f'Model trained with {model_result["n_features"]} concatenated features')
-                print(f'Validation AUC: {model_result["auc"]:.4f}, BAC: {model_result["bac"]:.4f}, BAC80: {model_result["bac80"]:.4f}')
+                print(f'LR Weights: {ensemble_result["lr_weights"]}')
                 
                 # Store predictions for this subject
                 y_true_all.extend(y_test)
-                y_pred_all.extend(model_result['test_preds'])
-                y_prob_all.extend(model_result['test_probs'])
+                y_pred_all.extend(ensemble_result['test_preds'])
+                y_prob_all.extend(ensemble_result['test_probs'])
                 subject_ids.extend([subject] * len(y_test))
                 
             
@@ -359,7 +494,6 @@ def main():
                 'roc_curve': roc_line,
                 'precision_recall_curve': pr_line
             })
-            
             # Prepare results DataFrame
             results = {
                 'run': run_n,
@@ -373,20 +507,16 @@ def main():
                 'f1_score': f1
             }
             results_df = pd.DataFrame([results])
-            
             # Prepare predictions DataFrame
-            predictions = {
-                'subject': subject_ids,
-                'y_true': y_true_all,
-                'y_pred': y_pred_all,
-                'y_prob': y_prob_all
-            }
-            predictions_df = pd.DataFrame(predictions)
-            
+            predictions_df = build_predictions_df(
+                y_test=y_true_all,
+                y_pred=y_pred_all,
+                y_prob=y_prob_all,
+                subject_ids=subject_ids
+            )
             # Save results and predictions
             save_results(results_df, predictions_df, RUN_NAME, run_n, seed)
             print(f"Results for combination {combination_name} saved successfully.")
-            
             # Finish wandb run
             wandb.finish()
             print(f"Run {RUN_NAME} completed successfully.")

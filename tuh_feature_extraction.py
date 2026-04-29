@@ -16,8 +16,6 @@ class HiddenPrints:
         sys.stdout.close()
         sys.stdout = self._original_stdout
 
-
-
 photostimulation_data_path = '/space/gzanardini/tuh_eeg/preprocessed'
 feature_path= '/space/gzanardini/tuh_background/'
 

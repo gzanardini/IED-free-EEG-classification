@@ -25,9 +25,9 @@ N_RUNS = 5
 N_CUDA = 0
 DEVICE='cpu'
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'tuh_ensemble_retrain_noieds'
+PROJECT_NAME = 'tuh_background_noieds'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
-DATA_FOLDER = '/space/gzanardini/tuh_whole/split'
+DATA_FOLDER = '/space/gzanardini/tuh_background/split'
 LOG_FOLDER = '/space/gzanardini/tuh/'
 N_JOBS_XGB = 4  # Set to 1 for compatibility with CUDA
 NUM_WORKERS = 10  # Number of parallel workers for training
@@ -41,16 +41,16 @@ combiners = ['mean', 'median', 'std', 'skew', 'kurt']
 
 # Best parameters from tuh_loso_whole_noIED.py
 best_parameters = {
-    'spectral': ('CAR', 1 ,'skew'),
-    'cwt': ('BipolarDB', 60, 'std'),
-    'dwt': ('Cz', 10, 'skew'),
-    'mst': ('BipolarDB', 10, 'skew'),
-    'sst': ('Laplacian', 20, 'skew'),
-    'cc': ('Cz', 10, 'skew'),
-    'plv': ('Laplacian', 2, 'std'),
-    'gcc': ('CAR', 1, 'std'),
-    'gplv': ('BipolarDB', 1, 'mean'),
-    'utm': ('Laplacian', 60, 'mean')
+    'spectral': ('BipolarDB', 2, 'kurt'),
+    'cwt':      ('Cz',      1,      'skew'),
+    'dwt':      ('Cz',     10,     'skew'),
+    'mst':      ('BipolarDB', 1, 'median'),
+    'sst':      ('Laplacian', 20, 'std'),
+    'cc':       ('CAR', 120, 'mean'),
+    'plv':      ('Cz', 60, 'std'),
+    'gcc':      ('Cz', 20, 'kurt'),
+    'gplv':     ('Laplacian', 10, 'mean'),
+    'utm':      ('Laplacian', 60, 'median')
 }
 
 subjects_to_skip = ['aaaaajgj', 'aaaaakcd']
@@ -252,7 +252,7 @@ def generate_feature_combinations():
     
     # Generate all combinations of 2 to len(feature_names) features
     #for i in range(3, len(feature_names) + 1):
-    for i in range(3,5): # Limit to combinations of 3 and 4 features for efficiency
+    for i in range(2,len(feature_names) + 1): # Changed to start from 2 
         combs = list(itertools.combinations(feature_names, i))
         for comb in combs:
             combinations.append(list(comb))
@@ -611,15 +611,15 @@ def main():
             cp.random.seed(seed)
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
-
-            skip_flag = False
-            for existing_run in wandb.Api(timeout=29).runs(path=PROJECT_NAME):
-                if existing_run.name == RUN_NAME:
+            # Check if run already exists in wandb
+            try:
+                api = wandb.Api(timeout=29)
+                existing_runs = {run.name for run in api.runs(path=PROJECT_NAME)}
+                if RUN_NAME in existing_runs:
                     print(f"Run {RUN_NAME} already exists, skipping...")
-                    skip_flag = True
-                    break
-            if skip_flag:
-                continue
+                    continue
+            except Exception as e:
+                print(f"Warning: Could not check existing runs ({e}). Proceeding anyway...")
 
             wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True, dir=LOG_FOLDER)
 
@@ -741,13 +741,12 @@ def main():
             }
             results_df = pd.DataFrame([results])
             # Prepare predictions DataFrame
-            predictions = {
-                'subject': subject_ids,
+            predictions_df = pd.DataFrame({
+                'subject_id': subject_ids,
                 'y_true': y_true_all,
                 'y_pred': y_pred_all,
                 'y_prob': y_prob_all
-            }
-            predictions_df = pd.DataFrame(predictions)
+            })
             # Save results and predictions
             save_results(results_df, predictions_df, RUN_NAME, run_n, seed)
             print(f"Results for combination {combination_name} saved successfully.")

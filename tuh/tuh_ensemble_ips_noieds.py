@@ -16,8 +16,6 @@ from joblib import Parallel, delayed
 from scipy.optimize import minimize
 from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
 from sklearn.isotonic import IsotonicRegression
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -27,11 +25,11 @@ N_RUNS = 5
 N_CUDA = 0
 DEVICE='cpu'
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'tuh_ensemble_retrain'
+PROJECT_NAME = 'tuh_ensemble_retrain_noieds'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 DATA_FOLDER = '/space/gzanardini/tuh_whole/split'
 LOG_FOLDER = '/space/gzanardini/tuh/'
-N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
+N_JOBS_XGB = 4  # Set to 1 for compatibility with CUDA
 NUM_WORKERS = 10  # Number of parallel workers for training
 N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
 SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
@@ -41,6 +39,7 @@ segment_lengths = [1, 2, 5, 10, 20, 60]
 feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gcc', 'gplv']
 combiners = ['mean', 'median', 'std', 'skew', 'kurt']
 
+# Best parameters from tuh_loso_whole_noIED.py
 best_parameters = {
     'spectral': ('CAR', 1 ,'skew'),
     'cwt': ('BipolarDB', 60, 'std'),
@@ -53,6 +52,9 @@ best_parameters = {
     'gplv': ('BipolarDB', 1, 'mean'),
     'utm': ('Laplacian', 60, 'mean')
 }
+
+subjects_to_skip = ['aaaaajgj', 'aaaaakcd']
+
 
 def train_simplex_logistic(X, y, max_iter=2500):
 
@@ -153,7 +155,7 @@ def handle_complex_numbers(features):
         features[~np.isfinite(features)] = np.nan
     return features
 
-def load_data():
+def load_data(no_ied=False):
     """Load and prepare the dataset."""
     description = pd.read_csv(f'{DATA_FOLDER}/description.csv')
     labels = description['epilepsy'].to_numpy()
@@ -165,8 +167,29 @@ def load_data():
         lbl = labels[subjects == subj][0]
         subject_labels.append([subj, lbl])
     subject_labels = np.array(subject_labels)
-    
-    return description, labels, subjects, unique_subjects, subject_labels
+
+    # if no_ied:
+    #     subject_to_skip = ['aaaaajgj', 'aaaaakcd']
+    #     for subj in subject_to_skip:
+    #         if subj in unique_subjects:
+    #             # Filter description dataframe
+    #             description = description[description['subject'] != subj]
+    #             print(f'Skipping subject {subj} --- CONTAINS IEDs')
+        
+    #     # Update arrays after filtering
+    #     labels = description['epilepsy'].to_numpy()
+    #     subjects = description['subject'].to_numpy()
+    #     unique_subjects = np.unique(description['subject'])
+        
+    #     # Rebuild subject_labels after filtering
+    #     subject_labels = []
+    #     for subj in unique_subjects:
+    #         lbl = labels[subjects == subj][0]
+    #         subject_labels.append([subj, lbl])
+    #     subject_labels = np.array(subject_labels)
+        
+    return description, labels, subjects, unique_subjects, subject_labels    
+
 
 def load_feature_data(feature_name):
     """Load and preprocess feature data using the best parameters for the given feature."""
@@ -198,20 +221,6 @@ def get_train_val_test_indices(description, labels, subject, seed):
     
     return train_idxs, val_idxs, test_idxs
 
-def generate_feature_combinations():
-    """Generate combinations of features from 2 to all features."""
-    combinations = []
-    
-    # Generate all combinations of 2 to len(feature_names) features
-    # for i in range(2, len(feature_names) + 1):
-    for i in range(2,5):
-        combs = list(itertools.combinations(feature_names, i))
-        for comb in combs:
-            combinations.append(list(comb))
-    
-    return combinations
-
-
 # Global variable to store preloaded data
 _feature_data_cache = {}
 
@@ -237,6 +246,18 @@ def get_cached_feature_data(feature_name):
     """Get preloaded feature data."""
     return _feature_data_cache[feature_name]
 
+def generate_feature_combinations():
+    """Generate combinations of features from 2 to all features."""
+    combinations = []
+    
+    # Generate all combinations of 2 to len(feature_names) features
+    #for i in range(3, len(feature_names) + 1):
+    for i in range(3,5): # Limit to combinations of 3 and 4 features for efficiency
+        combs = list(itertools.combinations(feature_names, i))
+        for comb in combs:
+            combinations.append(list(comb))
+    return combinations
+
 def train_feature_model_parallel(args):
     """Wrapper function for parallel feature model training."""
     feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed, retrain_on_trainval = args
@@ -256,7 +277,7 @@ def train_feature_model_parallel(args):
         
         model = XGBClassifier(
             scale_pos_weight=ratio,
-            n_jobs=1,
+            n_jobs=N_JOBS_XGB,
             device=DEVICE,
             n_estimators=100,
             seed=seed,
@@ -281,8 +302,8 @@ def train_feature_model_parallel(args):
         
         model = XGBClassifier(
             scale_pos_weight=ratio,
-            n_jobs=1,
-            device=f'cuda:{N_CUDA}',
+            n_jobs=N_JOBS_XGB,
+            device=DEVICE,
             n_estimators=100,
             seed=seed,
             max_depth=6,
@@ -403,7 +424,7 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
     print(f"Stage 1 - Validation AUC: {stage1_auc:.4f}, BAC: {stage1_bac:.4f}, BAC80: {stage1_bac80:.4f}")
     
     # === STAGE 1 LOGGING ===
-    # Prepare probability data for logging
+    # Prepare probability data for logging analysis
     raw_val_probs = np.column_stack(val_probs_list)
     calibrated_val_probs = np.column_stack(calibrated_probs)
     logits_val = X_meta_val
@@ -427,50 +448,86 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'stage1/meta_probs': wandb.Histogram(meta_val_probs)
     })
     
-    # STAGE 2: Retrain models on train+val data using learned weights, predict on test
+    # =================================================================================
+    # STAGE 2: MODEL RETRAINING AND FINAL PREDICTION PHASE
+    # =================================================================================
+    """
+    In Stage 2, we retrain all individual feature models on the combined train+validation
+    data to maximize the amount of training data available for the final models. This is
+    a common practice in two-stage ensemble learning where:
+    
+    1. Stage 1 is used to learn the optimal combination weights using a validation set
+    2. Stage 2 uses these learned weights but retrains models on all available data
+       (train+val) to get the best possible individual model performance
+    
+    The key insight is that we've already determined the optimal meta-learner weights
+    in Stage 1, so now we can safely use all non-test data for training the individual
+    models that will be combined using those learned weights.
+    """
     print(f"Stage 2: Retraining models on train+val data for final predictions...")
     
-    # Prepare arguments for parallel processing (second stage)
+    # Prepare arguments for parallel model retraining
+    # Each feature model will be retrained on train+val data (retrain_on_trainval=True)
     args_list_stage2 = [
         (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i, True)
         for i, feature_name in enumerate(feature_combination)
     ]
     
-    # Retrain feature models on train+val data
+    # Retrain all feature models in parallel on the expanded training set
+    # This uses the same XGBoost hyperparameters but with more training data
     feature_results_stage2 = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
         delayed(train_feature_model_parallel)(args) for args in args_list_stage2
     )
     
-    # Sort results to maintain order
+    # Ensure results are in the same order as the input feature combination
+    # This is crucial for consistent ensemble combination
     feature_models_stage2 = sorted(feature_results_stage2, key=lambda x: feature_combination.index(x['feature_name']))
     
-    # Remove feature_name from results as it's not needed anymore
+    # Clean up the results dictionary - feature names no longer needed
     for model in feature_models_stage2:
         del model['feature_name']
     
-    # Stack test probabilities and apply calibrators
+    # =================================================================================
+    # PROBABILITY CALIBRATION AND META-MODEL PREDICTION
+    # =================================================================================
+    """
+    Apply the same calibration pipeline used in Stage 1 to the test set predictions.
+    This ensures consistency between validation and test probability distributions.
+    
+    The calibration process:
+    1. Extract raw test probabilities from retrained models
+    2. Apply isotonic regression calibrators (fitted in Stage 1) to test probabilities
+    3. Convert calibrated probabilities to logits for meta-model input
+    4. Use the learned meta-model to generate final ensemble predictions
+    """
+    
+    # Extract test probabilities from all retrained feature models
     test_probs_list = [model['test_probs'] for model in feature_models_stage2]
     
-    # Apply calibrators to test probabilities
+    # Apply the same calibration transformations used in Stage 1
+    # These calibrators were fitted on validation data in Stage 1
     calibrated_test_probs = []
     for i, probs in enumerate(test_probs_list):
         cal_test_probs = calibrators[i].transform(probs)
         calibrated_test_probs.append(cal_test_probs)
     
-    # Convert calibrated test probabilities to logits
+    # Convert calibrated probabilities to logits for meta-model input
+    # Clipping prevents numerical issues with extreme probabilities (0 or 1)
     X_meta_test = np.column_stack([logit(np.clip(probs, 0.001, 0.999)) for probs in calibrated_test_probs])
 
-    # Generate final test predictions using the learned meta-model weights
+    # Generate final ensemble predictions using the meta-model learned in Stage 1
+    # This combines the calibrated logits using the optimal weights learned earlier
     meta_test_probs = meta_model.predict_proba(X_meta_test)[:, 1]
     
-    # Use validation data to find optimal threshold (from stage 1)
+    # Apply the optimal decision threshold determined in Stage 1 on validation data
+    # This threshold maximizes the geometric mean of sensitivity and specificity
     opt_threshold = find_optimal_threshold(y_val, meta_val_probs)
     meta_test_preds = (meta_test_probs >= opt_threshold).astype(int)
     
     print(f"Stage 2 - Final predictions generated using learned weights")
     
     # === STAGE 2 LOGGING ===
-    # Prepare probability data for logging
+    # Prepare test data for logging analysis
     raw_test_probs = np.column_stack(test_probs_list)
     calibrated_test_probs_matrix = np.column_stack(calibrated_test_probs)
     logits_test = X_meta_test
@@ -492,18 +549,34 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'stage2/opt_threshold': opt_threshold
     })
     
+    # =================================================================================
+    # RETURN RESULTS PACKAGE
+    # =================================================================================
+    """
+    Return a comprehensive results dictionary containing all components needed for:
+    1. Model evaluation and analysis
+    2. Future predictions on new data
+    3. Performance monitoring and comparison
+    
+    Key components returned:
+    - feature_models: The final retrained individual models (Stage 2)
+    - meta_model: The ensemble combination model with learned weights
+    - calibrators: Probability calibration models for each feature
+    - val_probs/test_probs: Validation and test ensemble probabilities
+    - test_preds: Final binary predictions using optimal threshold
+    - performance metrics: AUC, BAC, BAC80 from Stage 1 validation
+    """
     return {
-        'feature_models': feature_models_stage2,  # Final retrained models
-        'meta_model': meta_model,
-        'calibrators': calibrators,
-        'val_probs': meta_val_probs,  # From stage 1 for threshold selection
-        'test_probs': meta_test_probs,  # From stage 2 for final evaluation
-        'test_preds': meta_test_preds,
-        'opt_threshold': opt_threshold,
-        'auc': stage1_auc,  # Validation metrics from stage 1
-        'bac': stage1_bac,
-        'bac80': stage1_bac80,
-        'lr_weights': meta_model.coef_[0],
+        'feature_models': feature_models_stage2,  # Final retrained models (Stage 2)
+        'meta_model': meta_model,                 # Ensemble combination model with learned weights
+        'calibrators': calibrators,               # Isotonic regression calibrators for each feature
+        'val_probs': meta_val_probs,             # Stage 1 validation probabilities (for threshold selection)
+        'test_probs': meta_test_probs,           # Stage 2 final test probabilities
+        'test_preds': meta_test_preds,           # Final binary predictions using optimal threshold
+        'opt_threshold': opt_threshold,          # Optimal decision threshold from validation data
+        'stage1_auc': stage1_auc,               # Stage 1 validation AUC performance
+        'stage1_bac': stage1_bac,               # Stage 1 validation balanced accuracy
+        'stage1_bac80': stage1_bac80            # Stage 1 validation BAC with 80% sensitivity constraint
     }
 
 def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
@@ -515,7 +588,7 @@ def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
 def main():
     """Main execution function with data preloading."""
     setup_environment()
-    description, labels, subjects, unique_subjects, subject_labels = load_data()
+    description, labels, subjects, unique_subjects, subject_labels = load_data(no_ied=True)
     
     # Preload all feature data once
     preload_all_feature_data()
@@ -524,12 +597,13 @@ def main():
     all_combinations = generate_feature_combinations()
     print(f"Generated {len(all_combinations)} feature combinations to evaluate")
     
-        # Evaluate each feature combination
+    # Evaluate each feature combination
     for combination in all_combinations:
+        print(f"\nEvaluating combination: {'+'.join(combination)}")
+
         for run_n in range(N_RUNS):
 
             combination_name = '+'.join(combination)
-            print(f"\nEvaluating combination: {combination_name}")
 
             seed = secrets.randbelow(5000)
             random.seed(seed)
@@ -563,7 +637,10 @@ def main():
                       
             # Iterate through all subjects (LOSO)
             for subject in unique_subjects:
-                
+
+                if subject in subjects_to_skip:
+                    continue
+
                 # Leave current subject out for testing
                 train_idxs, val_idxs, test_idxs = get_train_val_test_indices(
                     description, labels, subject, seed
@@ -573,30 +650,35 @@ def main():
                 y_val = labels[val_idxs]
                 y_test = labels[test_idxs]
                 
-                # Train ensemble models for this feature combination (now with parallelization)
-                ensemble_result = train_ensemble_models(
-                    combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed
-                )
-
-                wandb.log({
-                    'validation/bac80:': ensemble_result['bac80'],
-                    'validation/auc': ensemble_result['auc'],
-                    'validation/bac': ensemble_result['bac'],
-                    'validation/opt_threshold': ensemble_result['opt_threshold'],
-                    'validation/weights': wandb.Histogram(ensemble_result['lr_weights'])
-                })
-
-                print(f'LR Weights: {ensemble_result["lr_weights"]}')
+                print(f"Subject {subject}: Train={len(train_idxs)}, Val={len(val_idxs)}, Test={len(test_idxs)}")
                 
-                # Store predictions for this subject
+                # Train ensemble models with two-stage approach
+                ensemble_results = train_ensemble_models(combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed)
+                
+                if ensemble_results is None:
+                    print(f"Failed to train models for subject {subject}, skipping...")
+                    continue
+                
+                # Extract results
+                test_probs = ensemble_results['test_probs']
+                test_preds = ensemble_results['test_preds']
+                
+                # Store results
                 y_true_all.extend(y_test)
-                y_pred_all.extend(ensemble_result['test_preds'])
-                y_prob_all.extend(ensemble_result['test_probs'])
+                y_pred_all.extend(test_preds)
+                y_prob_all.extend(test_probs)
                 subject_ids.extend([subject] * len(y_test))
                 
-            
-            # After LOSO CV is complete for this combination, calculate overall metrics
-            print(f"LOSO CV complete for combination: {combination_name}, calculating metrics...")
+                # Log per-subject results
+                if len(np.unique(y_test)) > 1:  # Only if test set has both classes
+                    subject_auc = roc_auc_score(y_test, test_probs)
+                    subject_bac = balanced_accuracy_score(y_test, test_preds)
+                    wandb.log({
+                        f'subject_{subject}_auc': subject_auc,
+                        f'subject_{subject}_bac': subject_bac
+                    }, step=len(y_true_all))
+                
+                print(f"Subject {subject} completed. Test samples: {len(y_test)}")
             
             # Calculate overall performance
             y_true_all = np.array(y_true_all)
@@ -659,22 +741,18 @@ def main():
             }
             results_df = pd.DataFrame([results])
             # Prepare predictions DataFrame
-            predictions = {
-                'subject': subject_ids,
+            predictions_df = pd.DataFrame({
+                'subject_id': subject_ids,
                 'y_true': y_true_all,
                 'y_pred': y_pred_all,
                 'y_prob': y_prob_all
-            }
-            predictions_df = pd.DataFrame(predictions)
+            })
             # Save results and predictions
             save_results(results_df, predictions_df, RUN_NAME, run_n, seed)
             print(f"Results for combination {combination_name} saved successfully.")
             # Finish wandb run
             wandb.finish()
             print(f"Run {RUN_NAME} completed successfully.")
-
-
- 
 
 if __name__ == "__main__":
     main()

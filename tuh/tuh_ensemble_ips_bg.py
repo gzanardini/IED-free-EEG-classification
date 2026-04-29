@@ -25,7 +25,7 @@ N_RUNS = 5
 N_CUDA = 0
 DEVICE = f'cuda:{N_CUDA}'
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'tuh_ips+bg_noieds'
+PROJECT_NAME = 'tuh_ips+bg'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
 DATA_FOLDER_IPS = '/space/gzanardini/tuh_whole/split'
 DATA_FOLDER_BG = '/space/gzanardini/tuh_background/split'
@@ -34,7 +34,6 @@ N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
 NUM_WORKERS = 10  # Number of max parallel workers for training
 N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
 SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
-subjects_to_skip = ['aaaaajgj', 'aaaaakcd']
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 segment_lengths = [1, 2, 5, 10, 20, 60]
@@ -54,6 +53,16 @@ best_parameters_ips = {
     'utm': ('Laplacian', 60, 'mean')
 }
 
+'''     utm Laplacian     60   median 
+        spectral BipolarDB      2     kurt 
+        plv        Cz     60      std 
+        cc       CAR    120     mean 
+        cwt        Cz      1     skew 
+        sst Laplacian     20      std 0
+        gplv Laplacian     10     mean 
+        dwt        Cz     10     skew 
+        gcc        Cz     20     kurt 
+        mst BipolarDB      1     median'''
 
 best_parameters_background= {
     'spectral': ('BipolarDB', 2, 'kurt'),
@@ -67,7 +76,7 @@ best_parameters_background= {
     'gplv':     ('Laplacian', 10, 'mean'),
     'utm':      ('Laplacian', 60, 'median')
 }
-    
+
 def train_simplex_logistic(X, y, max_iter=2500):
 
     d = X.shape[1]
@@ -634,9 +643,6 @@ def main():
             # Iterate through all subjects (LOSO)
             for subject in unique_subjects:
                 
-                if subject in subjects_to_skip:
-                    continue
-
                 # Leave current subject out for testing
                 train_idxs, val_idxs, test_idxs = get_train_val_test_indices(
                     description, labels, subject, seed
@@ -731,13 +737,12 @@ def main():
             }
             results_df = pd.DataFrame([results])
             # Prepare predictions DataFrame
-            predictions = {
-                'subject': subject_ids,
+            predictions_df = pd.DataFrame({
+                'subject_id': subject_ids,
                 'y_true': y_true_all,
                 'y_pred': y_pred_all,
                 'y_prob': y_prob_all
-            }
-            predictions_df = pd.DataFrame(predictions)
+            })
             # Save results and predictions
             save_results(results_df, predictions_df, RUN_NAME, run_n, seed)
             print(f"Results for combination {combination_name} saved successfully.")

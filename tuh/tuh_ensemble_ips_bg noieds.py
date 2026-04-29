@@ -16,8 +16,6 @@ from joblib import Parallel, delayed
 from scipy.optimize import minimize
 from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
 from sklearn.isotonic import IsotonicRegression
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -25,23 +23,39 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # Configuration
 N_RUNS = 5
 N_CUDA = 0
-DEVICE='cpu'
+DEVICE = f'cuda:{N_CUDA}'
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'tuh_background'
+PROJECT_NAME = 'tuh_ips+bg_noieds'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
-DATA_FOLDER = '/space/gzanardini/tuh_background/split'
+DATA_FOLDER_IPS = '/space/gzanardini/tuh_whole/split'
+DATA_FOLDER_BG = '/space/gzanardini/tuh_background/split'
 LOG_FOLDER = '/space/gzanardini/tuh/'
 N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
-NUM_WORKERS = 10  # Number of parallel workers for training
+NUM_WORKERS = 10  # Number of max parallel workers for training
 N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
 SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
+subjects_to_skip = ['aaaaajgj', 'aaaaakcd']
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 segment_lengths = [1, 2, 5, 10, 20, 60]
 feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gcc', 'gplv']
 combiners = ['mean', 'median', 'std', 'skew', 'kurt']
 
-best_parameters = {
+best_parameters_ips = {
+    'spectral': ('CAR', 1 ,'skew'),
+    'cwt': ('BipolarDB', 60, 'std'),
+    'dwt': ('Cz', 10, 'skew'),
+    'mst': ('BipolarDB', 10, 'skew'),
+    'sst': ('Laplacian', 20, 'skew'),
+    'cc': ('Cz', 10, 'skew'),
+    'plv': ('Laplacian', 2, 'std'),
+    'gcc': ('CAR', 1, 'std'),
+    'gplv': ('BipolarDB', 1, 'mean'),
+    'utm': ('Laplacian', 60, 'mean')
+}
+
+
+best_parameters_background= {
     'spectral': ('BipolarDB', 2, 'kurt'),
     'cwt':      ('Cz',      1,      'skew'),
     'dwt':      ('Cz',     10,     'skew'),
@@ -53,7 +67,7 @@ best_parameters = {
     'gplv':     ('Laplacian', 10, 'mean'),
     'utm':      ('Laplacian', 60, 'median')
 }
-
+    
 def train_simplex_logistic(X, y, max_iter=2500):
 
     d = X.shape[1]
@@ -103,32 +117,6 @@ def find_optimal_threshold(y_true, y_prob):
     opt_index = np.argmax(gmeans)
     return thresholds[opt_index]
 
-def log_probability_analysis(probs_dict, feature_names, stage_name, subject_id=None):
-    """
-    Log probability distributions and covariance analysis to wandb.
-    
-    Args:
-        probs_dict: Dictionary with keys like 'raw', 'calibrated', 'logits', 'meta'
-        feature_names: List of feature names
-        stage_name: String identifier for the stage (e.g., 'stage1_val', 'stage2_test')
-        subject_id: Optional subject identifier for LOSO logging
-    """
-    prefix = f"{stage_name}" 
-
-    # Log histograms for each type of probability
-    for prob_type, prob_data in probs_dict.items():
-        if prob_data is not None:
-            if prob_type == 'meta':
-                # Meta predictions are 1D
-                wandb.log({
-                    f"{prefix}/hist_{prob_type}": wandb.Histogram(prob_data)}, step=subject_id)
-            else:
-                # Individual feature predictions are 2D
-                for i, feature_name in enumerate(feature_names):
-                    if i < prob_data.shape[1]:
-                        wandb.log({f"{prefix}/hist_{prob_type}_{feature_name}": wandb.Histogram(prob_data[:, i])}, step=subject_id)
-
-
 def calculate_bac(labels, scores, sens_thresh):
     """Calculate balanced accuracy with sensitivity threshold."""
     fpr, tpr, thresholds = roc_curve(labels, scores)
@@ -153,9 +141,9 @@ def handle_complex_numbers(features):
         features[~np.isfinite(features)] = np.nan
     return features
 
-def load_data():
+def load_data(path):
     """Load and prepare the dataset."""
-    description = pd.read_csv(f'{DATA_FOLDER}/description.csv')
+    description = pd.read_csv(f'{path}/description.csv')
     labels = description['epilepsy'].to_numpy()
     subjects = description['subject'].to_numpy()
     unique_subjects = np.unique(description['subject'])
@@ -168,70 +156,126 @@ def load_data():
     
     return description, labels, subjects, unique_subjects, subject_labels
 
-def load_feature_data(feature_name):
-    """Load and preprocess feature data using the best parameters for the given feature."""
-    montage, segment_length, combiner = best_parameters[feature_name]
-    data = np.load(f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy')
-    data = handle_complex_numbers(data)
+def load_data_both():
+    """Load both background and IPS data, filter IPS to match background subjects."""
+    # Load background data (this determines the subject set)
+    bg_description = pd.read_csv(f'{DATA_FOLDER_BG}/description.csv')
+    bg_labels = bg_description['epilepsy'].to_numpy()
+    bg_subjects = bg_description['subject'].to_numpy()
+    bg_unique_subjects = np.unique(bg_description['subject'])
     
-    if len(data.shape) > 2:
-        data = data.reshape(data.shape[0], -1)
-    return cp.array(data), montage, segment_length, combiner
+    # Load IPS data
+    ips_description = pd.read_csv(f'{DATA_FOLDER_IPS}/description.csv')
+    ips_labels = ips_description['epilepsy'].to_numpy()
+    ips_subjects = ips_description['subject'].to_numpy()
+    
+    # Find common subjects
+    common_subjects = np.intersect1d(bg_unique_subjects, np.unique(ips_subjects))
+    print(f"Found {len(common_subjects)} common subjects between background and IPS data")
+    print(f"Background subjects: {len(bg_unique_subjects)}, IPS subjects: {len(np.unique(ips_subjects))}")
+    
+    # Filter background data to only include common subjects
+    bg_mask = np.isin(bg_subjects, common_subjects)
+    filtered_bg_description = bg_description[bg_mask].reset_index(drop=True)
+    filtered_bg_labels = bg_labels[bg_mask]
+    filtered_bg_subjects = bg_subjects[bg_mask]
+    
+    # Filter IPS data to only include common subjects
+    ips_mask = np.isin(ips_subjects, common_subjects)
+    filtered_ips_description = ips_description[ips_mask].reset_index(drop=True)
+    filtered_ips_labels = ips_labels[ips_mask]
+    filtered_ips_subjects = ips_subjects[ips_mask]
+    
+    # Verify that subjects and labels match between filtered datasets
+    assert np.array_equal(np.sort(filtered_bg_subjects), np.sort(filtered_ips_subjects)), "Subject mismatch between datasets"
+    assert np.array_equal(filtered_bg_labels[np.argsort(filtered_bg_subjects)], 
+                         filtered_ips_labels[np.argsort(filtered_ips_subjects)]), "Label mismatch between datasets"
+    
+    # Additional sanity checks
+    print(f"Sanity check - Filtered background data: {len(filtered_bg_subjects)} samples")
+    print(f"Sanity check - Filtered IPS data: {len(filtered_ips_subjects)} samples")
+    print(f"Sanity check - Background epilepsy ratio: {np.mean(filtered_bg_labels):.3f}")
+    print(f"Sanity check - IPS epilepsy ratio: {np.mean(filtered_ips_labels):.3f}")
+    
+    # Create mapping for reordering IPS data to match background order
+    bg_subject_order = {subj: idx for idx, subj in enumerate(filtered_bg_subjects)}
+    ips_reorder_indices = [np.where(filtered_ips_subjects == subj)[0][0] for subj in filtered_bg_subjects]
+    
+    subject_labels = []
+    for subj in common_subjects:
+        lbl = filtered_bg_labels[filtered_bg_subjects == subj][0]
+        subject_labels.append([subj, lbl])
+    subject_labels = np.array(subject_labels)
+    
+    return (filtered_bg_description, filtered_bg_labels, filtered_bg_subjects, common_subjects, subject_labels, 
+            ips_reorder_indices)
 
-def get_train_val_test_indices(description, labels, subject, seed):
-    """Get indices for train/validation/test splits for LOSO CV."""
-    test_idxs = np.where(description['subject'] == subject)[0]
-    subjects = description['subject']
-    unique_subjects = np.unique(subjects)
-    other_subjects = [subj for subj in unique_subjects if subj != subject]
-    other_subjects_labels = np.array([[subj, labels[subjects == subj][0]] for subj in other_subjects])
+def preload_all_feature_data_combined():
+    """Preload and concatenate both IPS and background feature data."""
+    print("Preloading and concatenating IPS and background feature data...")
+    cache = {}
     
-    train_subjects, val_subjects = train_test_split(
-        other_subjects, 
-        test_size=SPLIT_RATIO, 
-        stratify=other_subjects_labels[:, 1], 
-        random_state=seed
-    )
-    
-    train_idxs = np.where(np.isin(description['subject'], train_subjects))[0]
-    val_idxs = np.where(np.isin(description['subject'], val_subjects))[0]
-    
-    return train_idxs, val_idxs, test_idxs
-
-def generate_feature_combinations():
-    """Generate combinations of features from 2 to all features."""
-    combinations = []
-    
-    # Generate all combinations of 2 to len(feature_names) features
-    # for i in range(2, len(feature_names) + 1):
-    for i in range(5, len(feature_names) + 1): # Focus on combinations of 5 or more features
-        combs = list(itertools.combinations(feature_names, i))
-        for comb in combs:
-            combinations.append(list(comb))
-    
-    return combinations
-
-
-# Global variable to store preloaded data
-_feature_data_cache = {}
-
-def preload_all_feature_data():
-    """Preload all feature data to avoid repeated loading."""
-    print("Preloading all feature data...")
-    global _feature_data_cache
+    # Load subject mapping information
+    _, _, _, _, _, ips_reorder_indices = load_data_both()
     
     for feature_name in feature_names:
-        montage, segment_length, combiner = best_parameters[feature_name]
-        data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
-        data = np.load(data_path)
-        data = handle_complex_numbers(data)
+        # Load background data
+        bg_montage, bg_segment_length, bg_combiner = best_parameters_background[feature_name]
+        bg_data_path = f'{DATA_FOLDER_BG}/{feature_name}_{bg_montage}_{bg_segment_length}s_{bg_combiner}.npy'
+        bg_data = np.load(bg_data_path)
+        bg_data = handle_complex_numbers(bg_data)
         
-        if len(data.shape) > 2:
-            data = data.reshape(data.shape[0], -1)
+        if len(bg_data.shape) > 2:
+            bg_data = bg_data.reshape(bg_data.shape[0], -1)
+        
+        # Load IPS data
+        ips_montage, ips_segment_length, ips_combiner = best_parameters_ips[feature_name]
+        ips_data_path = f'{DATA_FOLDER_IPS}/{feature_name}_{ips_montage}_{ips_segment_length}s_{ips_combiner}.npy'
+        ips_data = np.load(ips_data_path)
+        ips_data = handle_complex_numbers(ips_data)
+        
+        if len(ips_data.shape) > 2:
+            ips_data = ips_data.reshape(ips_data.shape[0], -1)
+        
+        # Sanity checks before reordering and concatenation
+        print(f"Sanity check - {feature_name}:")
+        print(f"  Background original shape: {bg_data.shape}")
+        print(f"  IPS original shape: {ips_data.shape}")
+        
+        # Verify we have enough samples after filtering
+        expected_samples = len(ips_reorder_indices)
+        assert bg_data.shape[0] == expected_samples, f"Background {feature_name}: expected {expected_samples} samples, got {bg_data.shape[0]}"
+        assert ips_data.shape[0] >= expected_samples, f"IPS {feature_name}: expected at least {expected_samples} samples, got {ips_data.shape[0]}"
+        
+        # Reorder IPS data to match background subject order
+        ips_data_reordered = ips_data[ips_reorder_indices]
+        
+        # Final sanity check after reordering
+        assert ips_data_reordered.shape[0] == bg_data.shape[0], f"Shape mismatch after reordering for {feature_name}: BG={bg_data.shape[0]}, IPS={ips_data_reordered.shape[0]}"
+        
+        # Concatenate along feature axis (axis=1)
+        combined_data = np.concatenate([bg_data, ips_data_reordered], axis=1)
         
         # Convert to cupy array for GPU processing
-        _feature_data_cache[feature_name] = cp.array(data)
-        print(f"Loaded {feature_name}: {data.shape}")
+        cache[feature_name] = cp.array(combined_data)
+        print(f"  Final combined shape: {combined_data.shape} (BG: {bg_data.shape[1]} + IPS: {ips_data_reordered.shape[1]} features)")
+    
+    print("All feature data loaded and concatenated successfully!")
+    return cache
+
+def generate_feature_combinations(start=2, end=None):
+    """Generate all possible combinations of features."""
+    all_combinations = []
+    
+    if end is None:
+        end = len(feature_names)
+    
+    # Generate combinations of different lengths (start to end features)
+    for length in range(start, end + 1):
+        combos = itertools.combinations(feature_names, length)
+        all_combinations.extend(list(combos))
+    
+    return all_combinations
 
 def get_cached_feature_data(feature_name):
     """Get preloaded feature data."""
@@ -256,7 +300,7 @@ def train_feature_model_parallel(args):
         
         model = XGBClassifier(
             scale_pos_weight=ratio,
-            n_jobs=1,
+            n_jobs=N_JOBS_XGB,
             device=DEVICE,
             n_estimators=100,
             seed=seed,
@@ -281,8 +325,8 @@ def train_feature_model_parallel(args):
         
         model = XGBClassifier(
             scale_pos_weight=ratio,
-            n_jobs=1,
-            device=f'cuda:{N_CUDA}',
+            n_jobs=N_JOBS_XGB,
+            device=DEVICE,
             n_estimators=100,
             seed=seed,
             max_depth=6,
@@ -415,17 +459,15 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'meta': meta_val_probs
     }
     
-    # Log Stage 1 analysis
-    log_probability_analysis(stage1_probs, feature_combination, 'stage1_validation')
     
-    # Log stage 1 specific metrics
-    wandb.log({
-        'stage1/auc': stage1_auc,
-        'stage1/bac': stage1_bac,
-        'stage1/bac80': stage1_bac80,
-        'stage1/weights': wandb.Histogram(w_simplex),
-        'stage1/meta_probs': wandb.Histogram(meta_val_probs)
-    })
+    # # Log stage 1 specific metrics
+    # wandb.log({
+    #     'stage1/auc': stage1_auc,
+    #     'stage1/bac': stage1_bac,
+    #     'stage1/bac80': stage1_bac80,
+    #     'stage1/weights': wandb.Histogram(w_simplex),
+    #     'stage1/meta_probs': wandb.Histogram(meta_val_probs)
+    # })
     
     # STAGE 2: Retrain models on train+val data using learned weights, predict on test
     print(f"Stage 2: Retraining models on train+val data for final predictions...")
@@ -482,15 +524,6 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'meta': meta_test_probs
     }
     
-    # Log Stage 2 analysis
-    log_probability_analysis(stage2_probs, feature_combination, 'stage2_test')
-    
-    # Log stage 2 specific metrics
-    wandb.log({
-        'stage2/meta_probs': wandb.Histogram(meta_test_probs),
-        'stage2/meta_preds': wandb.Histogram(meta_test_preds),
-        'stage2/opt_threshold': opt_threshold
-    })
     
     return {
         'feature_models': feature_models_stage2,  # Final retrained models
@@ -505,6 +538,29 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         'bac80': stage1_bac80,
         'lr_weights': meta_model.coef_[0],
     }
+ 
+
+def get_train_val_test_indices(description, labels, test_subject, seed):
+    """Get train, validation, and test indices for LOSO cross-validation."""
+    # Test set: current subject
+    test_idxs = np.where(description['subject'] == test_subject)[0]
+    
+    # Remaining subjects for train/val split
+    remaining_idxs = np.where(description['subject'] != test_subject)[0]
+    remaining_subjects = np.unique(description['subject'][remaining_idxs])
+    
+    # Split remaining subjects into train and validation
+    train_subjects, val_subjects = train_test_split(
+        remaining_subjects, test_size=SPLIT_RATIO, random_state=seed, 
+        stratify=[labels[description['subject'] == subj][0] for subj in remaining_subjects]
+    )
+    
+    # Get indices for train and validation sets
+    train_idxs = np.where(np.isin(description['subject'], train_subjects))[0]
+    val_idxs = np.where(np.isin(description['subject'], val_subjects))[0]
+    
+    return train_idxs, val_idxs, test_idxs
+
 
 def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
     """Save results to CSV files."""
@@ -512,19 +568,26 @@ def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
     results_df.to_csv(f'{LOG_FOLDER}/{PROJECT_NAME}/{RUN_NAME}_run_{run_n}_results_seed_{seed}.csv', index=False)
     predictions_df.to_csv(f'{LOG_FOLDER}/{PROJECT_NAME}/{RUN_NAME}_run_{run_n}_predictions_seed_{seed}.csv', index=False)
 
+
 def main():
-    """Main execution function with data preloading."""
+    """Main execution function with combined data preloading."""
     setup_environment()
-    description, labels, subjects, unique_subjects, subject_labels = load_data()
     
-    # Preload all feature data once
-    preload_all_feature_data()
+    # Load combined data information
+    description, labels, subjects, unique_subjects, subject_labels, _ = load_data_both()
+    
+    # Store the combined data in global cache
+    global _feature_data_cache
+    _feature_data_cache = preload_all_feature_data_combined()
+
+    checkpoint=False
     
     # Generate all feature combinations once before starting runs
     all_combinations = generate_feature_combinations()
     print(f"Generated {len(all_combinations)} feature combinations to evaluate")
+    print(f"Using {len(unique_subjects)} subjects from combined IPS+Background data")
     
-        # Evaluate each feature combination
+    # Evaluate each feature combination
     for combination in all_combinations:
         for run_n in range(N_RUNS):
 
@@ -537,9 +600,16 @@ def main():
             cp.random.seed(seed)
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
+            # if not checkpoint:
+            #     if RUN_NAME == 'cc+dwt+mst+sst+gcc_run_1' :    #   for length 5 if crashes -> 'cc+cwt+utm+gcc+gplv_run_3'
+            #         checkpoint = True
+            #         print(f"Reached checkpoint: {RUN_NAME}, continuing with this and remaining runs...")
+            #     else:
+            #         print(f"Skipping run {RUN_NAME} (before checkpoint)...")
+            #         continue
 
             # skip_flag = False
-            # for existing_run in wandb.Api(timeout=29).runs(path=PROJECT_NAME):
+            # for existing_run in wandb.Api(timeout=99).runs(path=PROJECT_NAME):
             #     if existing_run.name == RUN_NAME:
             #         print(f"Run {RUN_NAME} already exists, skipping...")
             #         skip_flag = True
@@ -547,7 +617,7 @@ def main():
             # if skip_flag:
             #     continue
 
-            wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True, dir=LOG_FOLDER)
+            wandb.init(project=PROJECT_NAME, name=RUN_NAME, dir=LOG_FOLDER)
 
             wandb.config.seed = seed
             wandb.config.combination_length = len(combination)
@@ -564,6 +634,9 @@ def main():
             # Iterate through all subjects (LOSO)
             for subject in unique_subjects:
                 
+                if subject in subjects_to_skip:
+                    continue
+
                 # Leave current subject out for testing
                 train_idxs, val_idxs, test_idxs = get_train_val_test_indices(
                     description, labels, subject, seed
@@ -582,7 +655,6 @@ def main():
                     'validation/bac80:': ensemble_result['bac80'],
                     'validation/auc': ensemble_result['auc'],
                     'validation/bac': ensemble_result['bac'],
-                    'validation/opt_threshold': ensemble_result['opt_threshold'],
                     'validation/weights': wandb.Histogram(ensemble_result['lr_weights'])
                 })
 
@@ -659,22 +731,19 @@ def main():
             }
             results_df = pd.DataFrame([results])
             # Prepare predictions DataFrame
-            predictions = {
-                'subject': subject_ids,
+            predictions_df = pd.DataFrame({
+                'subject_id': subject_ids,
                 'y_true': y_true_all,
                 'y_pred': y_pred_all,
                 'y_prob': y_prob_all
-            }
-            predictions_df = pd.DataFrame(predictions)
+            })
+
             # Save results and predictions
             save_results(results_df, predictions_df, RUN_NAME, run_n, seed)
             print(f"Results for combination {combination_name} saved successfully.")
             # Finish wandb run
             wandb.finish()
             print(f"Run {RUN_NAME} completed successfully.")
-
-
- 
 
 if __name__ == "__main__":
     main()

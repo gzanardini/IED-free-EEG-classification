@@ -651,13 +651,12 @@ def main():
             }
             results_df = pd.DataFrame([results])
             # Prepare predictions DataFrame
-            predictions = {
-                'subject': subject_ids,
+            predictions_df = pd.DataFrame({
+                'subject_id': subject_ids,
                 'y_true': y_true_all,
                 'y_pred': y_pred_all,
                 'y_prob': y_prob_all
-            }
-            predictions_df = pd.DataFrame(predictions)
+            })
             # Save results and predictions
             save_results(results_df, predictions_df, RUN_NAME, run_n, seed)
             print(f"Results for combination {combination_name} saved successfully.")

@@ -3,8 +3,8 @@ import wandb.plot
 from xgboost import XGBClassifier
 import numpy as np 
 import pandas as pd
-from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score, average_precision_score
-from sklearn.metrics import auc as auc_sklearn
+from prediction_logging import build_predictions_df
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, precision_recall_curve, balanced_accuracy_score
 import itertools 
 import secrets
 from sklearn.model_selection import train_test_split
@@ -14,43 +14,53 @@ from cupy.cuda import Device
 import random
 from joblib import Parallel, delayed
 from scipy.optimize import minimize
-from scipy.special import expit, logit            # σ(x) = 1 / (1+e^{-x})
-from sklearn.isotonic import IsotonicRegression
+from scipy.special import expit, logit          # σ(x) = 1 / (1+e^{-x})
 
 np.set_printoptions(linewidth=200, precision=4)
 warnings.simplefilter(action='ignore', category=FutureWarning)
-
 # Configuration
 N_RUNS = 5
 N_CUDA = 0
-DEVICE = 'cuda'
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'emc_ensemble_hv_responders'
+PROJECT_NAME = 'tuh_ens_penalty_noIED'
 WANDB_KEY = '96e9a92e52e807ed253b3872afd1de1bafc3640a'
-DATA_FOLDER = '/space/gzanardini/emc_hv/'
-LOG_FOLDER = '/space/gzanardini/emc/'
-N_JOBS_XGB = 4  # Set to 1 for compatibility with CUDA
-NUM_WORKERS = 10  # Number of max parallel workers for training
+DATA_FOLDER = '/space/gzanardini/tuh_whole/split'
+LOG_FOLDER = '/space/gzanardini/tuh/'
+N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
+NUM_WORKERS = 16  # Number of parallel workers for training
 N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
-SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
+SCIPY_ARRAY_API=1
 
-feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'sr', 'utm', 'gcc', 'gplv']
+montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
+segment_lengths = [1, 2, 5, 10, 20, 60]
+feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gcc', 'gplv']
+combiners = ['mean', 'median', 'std', 'skew', 'kurt']
 
 best_parameters = {
-    'sr':       ('BipolarDB',          60 ,    'skew'),
-    'cwt':      ('CAR',   2,      'median'),
-    'dwt':      ('Laplacian',   60,     'std'),
-    'mst':      ('BipolarDB',   60,     'kurtosis'),
-    'sst':      ('BipolarDB',   60,     'kurtosis'),
-    'cc':       ('Laplacian',   60,      'std'),
-    'plv':      ('CAR',   60,      'skew'),
-    'gcc':      ('BipolarDB',         10,      'skew'),
-    'gplv':     ('BipolarDB',   2,      'kurt'),
-    'utm':      ('Cz',   10,     'kurt')
+    'spectral': ('CAR', 1 ,'skew'),
+    'cwt': ('BipolarDB', 60, 'std'),
+    'dwt': ('Cz', 10, 'skew'),
+    'mst': ('BipolarDB', 10, 'skew'),
+    'sst': ('Laplacian', 20, 'skew'),
+    'cc': ('Cz', 10, 'skew'),
+    'plv': ('Laplacian', 2, 'std'),
+    'gcc': ('CAR', 1, 'std'),
+    'gplv': ('BipolarDB', 1, 'mean'),
+    'utm': ('Laplacian', 60, 'mean')
 }
 
-def train_simplex_logistic(X, y, max_iter=2500, alpha=1.05):
+def train_simplex_logistic(X, y, max_iter=2500):
+    """
+    Fit a bias-free logistic model with weights on the probability simplex.
 
+    Args
+    ----
+    X : (n_samples, n_models) validation probabilities of the base models
+    y : (n_samples,)           0/1 labels
+    Returns
+    -------
+    w : (n_models,) positive weights summing to 1
+    """
     d = X.shape[1]
     init_w = np.full(d, 1.0/d)                # uniform start
 
@@ -59,11 +69,12 @@ def train_simplex_logistic(X, y, max_iter=2500, alpha=1.05):
         logits = X @ w
         ce = -np.sum(y * np.log(expit(logits)) +
                      (1 - y) * np.log(1 - expit(logits)))
-       # α = 1 is uniform prior; α > 1 discourages zeros
+        alpha = 1.05        # α = 1 is uniform prior; α > 1 discourages zeros
+
         dirichlet_pen = (alpha - 1) * -np.sum(np.log(w + 1e-12))
         return ce + dirichlet_pen
 
-    bounds      = [(0.00, None)] * d             # w_i ≥ 0
+    bounds      = [(0.0, None)] * d             # w_i ≥ 0
     constraints = {'type': 'eq',
                    'fun': lambda w: np.sum(w) - 1}
 
@@ -87,8 +98,7 @@ class SimplexLogistic:
 
 def setup_environment():
     """Initialize CUDA and wandb."""
-    if DEVICE != 'cpu':
-        Device(N_CUDA).use()
+    Device(N_CUDA).use()
     wandb.login(key=WANDB_KEY)
     
 def find_optimal_threshold(y_true, y_prob):
@@ -97,32 +107,6 @@ def find_optimal_threshold(y_true, y_prob):
     gmeans = np.sqrt(tpr * (1 - fpr))
     opt_index = np.argmax(gmeans)
     return thresholds[opt_index]
-
-def log_probability_analysis(probs_dict, feature_names, stage_name, subject_id=None):
-    """
-    Log probability distributions and covariance analysis to wandb.
-    
-    Args:
-        probs_dict: Dictionary with keys like 'raw', 'calibrated', 'logits', 'meta'
-        feature_names: List of feature names
-        stage_name: String identifier for the stage (e.g., 'stage1_val', 'stage2_test')
-        subject_id: Optional subject identifier for LOSO logging
-    """
-    prefix = f"{stage_name}" 
-
-    # Log histograms for each type of probability
-    for prob_type, prob_data in probs_dict.items():
-        if prob_data is not None:
-            if prob_type == 'meta':
-                # Meta predictions are 1D
-                wandb.log({
-                    f"{prefix}/hist_{prob_type}": wandb.Histogram(prob_data)}, step=subject_id)
-            else:
-                # Individual feature predictions are 2D
-                for i, feature_name in enumerate(feature_names):
-                    if i < prob_data.shape[1]:
-                        wandb.log({f"{prefix}/hist_{prob_type}_{feature_name}": wandb.Histogram(prob_data[:, i])}, step=subject_id)
-
 
 def calculate_bac(labels, scores, sens_thresh):
     """Calculate balanced accuracy with sensitivity threshold."""
@@ -148,7 +132,9 @@ def handle_complex_numbers(features):
         features[~np.isfinite(features)] = np.nan
     return features
 
-def load_data():
+
+
+def load_data(no_ied=False):
     """Load and prepare the dataset."""
     description = pd.read_csv(f'{DATA_FOLDER}/description.csv')
     labels = description['epilepsy'].to_numpy()
@@ -160,7 +146,15 @@ def load_data():
         lbl = labels[subjects == subj][0]
         subject_labels.append([subj, lbl])
     subject_labels = np.array(subject_labels)
-    
+
+    if no_ied:
+        subject_to_skip = ['aaaaajgj', 'aaaaakcd']
+        for subj in subject_to_skip:
+            idx = np.where(unique_subjects == subj)[0]
+            if len(idx) > 0:
+                unique_subjects = np.delete(unique_subjects, idx)
+                labels = np.delete(labels, np.where(subjects == subj)[0])
+                print(f'Skipping subject {subj} --- CONTAINS IEDs')     
     return description, labels, subjects, unique_subjects, subject_labels
 
 def load_feature_data(feature_name):
@@ -175,17 +169,9 @@ def load_feature_data(feature_name):
 
 def get_train_val_test_indices(description, labels, subject, seed):
     """Get indices for train/validation/test splits for LOSO CV."""
-    # Load HV responders and filter for only positive responders
-    hv_responders = pd.read_csv('/users/gzanardini/eeg_thesis/emc/hv_responders.csv')
-    responder_subjects = set(hv_responders[hv_responders['hv_success'] == 1]['subject'].values)
-    
     test_idxs = np.where(description['subject'] == subject)[0]
     subjects = description['subject']
     unique_subjects = np.unique(subjects)
-    
-    # Filter to only include HV responders
-    unique_subjects = np.array([subj for subj in unique_subjects if subj in responder_subjects])
-    
     other_subjects = [subj for subj in unique_subjects if subj != subject]
     other_subjects_labels = np.array([[subj, labels[subjects == subj][0]] for subj in other_subjects])
     
@@ -223,7 +209,7 @@ def preload_all_feature_data():
     
     for feature_name in feature_names:
         montage, segment_length, combiner = best_parameters[feature_name]
-        data_path = f'{DATA_FOLDER}{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
+        data_path = f'{DATA_FOLDER}/{feature_name}_{montage}_{segment_length}s_{combiner}.npy'
         data = np.load(data_path)
         data = handle_complex_numbers(data)
         
@@ -240,7 +226,7 @@ def get_cached_feature_data(feature_name):
 
 def train_feature_model_parallel(args):
     """Wrapper function for parallel feature model training."""
-    feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed, retrain_on_trainval = args
+    feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed = args
     
     # Set random seeds for this process
     random.seed(seed)
@@ -249,71 +235,42 @@ def train_feature_model_parallel(args):
     # Get cached data instead of loading
     data = get_cached_feature_data(feature_name)
     
-    if retrain_on_trainval:
-        # Second stage: Train on train+val data for final predictions
-        train_val_idxs = np.concatenate([train_idxs, val_idxs])
-        y_train_val = np.concatenate([y_train, y_val])
-        ratio = (len(y_train_val) - sum(y_train_val)) / sum(y_train_val)
+    ratio = (len(y_train) - sum(y_train)) / sum(y_train)
+    
+    model = XGBClassifier(
+        scale_pos_weight=ratio,
+        n_jobs=1,  # Keep this as 1 since we're parallelizing at higher level
+        device=f'cuda:{N_CUDA}',
+        n_estimators=100,
+        seed=seed,
+        max_depth=6,
+        subsample=0.9,
+        gamma=0.1,
+        learning_rate=0.01
+    )
+    model.fit(data[train_idxs], y_train)
+    
+    # Generate predictions
+    train_probs = model.predict_proba(data[train_idxs])[:, 1]
+    val_probs = model.predict_proba(data[val_idxs])[:, 1]
+    test_probs = model.predict_proba(data[test_idxs])[:, 1]
+    
+    # Calculate metrics
+    auc = roc_auc_score(y_val, val_probs)
+    bac = balanced_accuracy_score(y_val, val_probs >= 0.5)
+    bac80, _, _, _ = calculate_bac(y_val, val_probs, 0.8)
+    score = auc + bac
         
-        model = XGBClassifier(
-            scale_pos_weight=ratio,
-            n_jobs=N_JOBS_XGB,
-            device=DEVICE,
-            n_estimators=100,
-            seed=seed,
-            max_depth=6,
-            subsample=0.9,
-            gamma=0.1,
-            learning_rate=0.01
-        )
-        model.fit(data[train_val_idxs], y_train_val)
-        
-        # Only generate test predictions for final stage
-        test_probs = model.predict_proba(data[test_idxs])[:, 1]
-        
-        return {
-            'feature_name': feature_name,
-            'test_probs': test_probs,
-            'model': model
-        }
-    else:
-        # First stage: Train on train data, validate on val data
-        ratio = (len(y_train) - sum(y_train)) / sum(y_train)
-        
-        model = XGBClassifier(
-            scale_pos_weight=ratio,
-            n_jobs=N_JOBS_XGB,
-            device=DEVICE,
-            n_estimators=100,
-            seed=seed,
-            max_depth=6,
-            subsample=0.9,
-            gamma=0.1,
-            learning_rate=0.01
-        )
-        model.fit(data[train_idxs], y_train)
-        
-        # Generate predictions
-        train_probs = model.predict_proba(data[train_idxs])[:, 1]
-        val_probs = model.predict_proba(data[val_idxs])[:, 1]
-        test_probs = model.predict_proba(data[test_idxs])[:, 1]
-        
-        # Calculate metrics
-        auc = roc_auc_score(y_val, val_probs)
-        bac = balanced_accuracy_score(y_val, val_probs >= 0.5)
-        bac80, _, _, _ = calculate_bac(y_val, val_probs, 0.8)
-        score = auc + bac
-            
-        return {
-            'feature_name': feature_name,
-            'train_probs': train_probs,
-            'val_probs': val_probs,
-            'test_probs': test_probs,
-            'auc': auc,
-            'bac': bac,
-            'bac80': bac80,
-            'score': score
-        }
+    return {
+        'feature_name': feature_name,
+        'train_probs': train_probs,
+        'val_probs': val_probs,
+        'test_probs': test_probs,
+        'auc': auc,
+        'bac': bac,
+        'bac80': bac80,
+        'score': score
+    }
 
 def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
     """Train a model for a single feature using cached data."""
@@ -323,7 +280,7 @@ def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, 
     model = XGBClassifier(
         scale_pos_weight=ratio,
         n_jobs=N_JOBS_XGB,
-        device=DEVICE,
+        device=f'cuda:{N_CUDA}',
         n_estimators=100,
         seed=seed,
         max_depth=6,
@@ -355,148 +312,63 @@ def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, 
     }
 
 def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
-    """Train models for a combination of features in parallel and create an ensemble with two-stage training."""
+    """Train models for a combination of features in parallel and create an ensemble."""
     
-    # STAGE 1: Train models on train data, validate on val data, learn meta-learner weights
-    print(f"Stage 1: Training individual models and learning meta-learner weights...")
-    
-    # Prepare arguments for parallel processing (first stage)
-    args_list_stage1 = [
-        (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i, False)
+    # Use parallel training if combination has multiple features
+    # Prepare arguments for parallel processing
+    args_list = [
+        (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i)
         for i, feature_name in enumerate(feature_combination)
     ]
     
     # Train feature models in parallel using joblib (thread-based for GPU compatibility)
-    feature_results_stage1 = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
-        delayed(train_feature_model_parallel)(args) for args in args_list_stage1
+    feature_results = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
+        delayed(train_feature_model_parallel)(args) for args in args_list
     )
     
     # Sort results to maintain order
-    feature_models_stage1 = sorted(feature_results_stage1, key=lambda x: feature_combination.index(x['feature_name']))
-    
-    # Stack validation probabilities and calibrate them
-    
-    val_probs_list = [model['val_probs'] for model in feature_models_stage1]
-    
-    # Calibrate each model's probabilities using isotonic regression
-    calibrated_probs = []
-    calibrators = []
-    for i, probs in enumerate(val_probs_list):
-        calibrator = IsotonicRegression(out_of_bounds='clip')
-        cal_probs = calibrator.fit_transform(probs, y_val)
-        calibrated_probs.append(cal_probs)
-        calibrators.append(calibrator)
-    
-    # Convert calibrated probabilities to logits
-    X_meta_val = np.column_stack([logit(np.clip(probs, 0.001, 0.999)) for probs in calibrated_probs])
-
-    # Train logistic regression meta-model to learn weights
-    w_simplex = train_simplex_logistic(X_meta_val, y_val)
-    meta_model = SimplexLogistic(w_simplex)
-    
-    # Calculate validation metrics for logging
-    meta_val_probs = meta_model.predict_proba(X_meta_val)[:, 1]
-    stage1_auc = roc_auc_score(y_val, meta_val_probs)
-    stage1_bac = balanced_accuracy_score(y_val, meta_val_probs >= 0.5)
-    stage1_bac80, _, _, _ = calculate_bac(y_val, meta_val_probs, 0.8)
-    
-    print(f"Stage 1 - Meta-learner weights: {w_simplex}")
-    print(f"Stage 1 - Validation AUC: {stage1_auc:.4f}, BAC: {stage1_bac:.4f}, BAC80: {stage1_bac80:.4f}")
-    
-    # === STAGE 1 LOGGING ===
-    # Prepare probability data for logging
-    raw_val_probs = np.column_stack(val_probs_list)
-    calibrated_val_probs = np.column_stack(calibrated_probs)
-    logits_val = X_meta_val
-    
-    stage1_probs = {
-        'raw': raw_val_probs,
-        'calibrated': calibrated_val_probs, 
-        'logits': logits_val,
-        'meta': meta_val_probs
-    }
-    
-    # Log Stage 1 analysis
-    #log_probability_analysis(stage1_probs, feature_combination, 'stage1_validation')
-    
-    # Log stage 1 specific metrics
-    # wandb.log({
-    #     'stage1/auc': stage1_auc,
-    #     'stage1/bac': stage1_bac,
-    #     'stage1/bac80': stage1_bac80,
-    #     'stage1/weights': wandb.Histogram(w_simplex),
-    #     'stage1/meta_probs': wandb.Histogram(meta_val_probs)
-    # })
-    
-    # STAGE 2: Retrain models on train+val data using learned weights, predict on test
-    print(f"Stage 2: Retraining models on train+val data for final predictions...")
-    
-    # Prepare arguments for parallel processing (second stage)
-    args_list_stage2 = [
-        (feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed + i, True)
-        for i, feature_name in enumerate(feature_combination)
-    ]
-    
-    # Retrain feature models on train+val data
-    feature_results_stage2 = Parallel(n_jobs=min(N_PARALLEL_FEATURES, len(feature_combination)), backend='threading')(
-        delayed(train_feature_model_parallel)(args) for args in args_list_stage2
-    )
-    
-    # Sort results to maintain order
-    feature_models_stage2 = sorted(feature_results_stage2, key=lambda x: feature_combination.index(x['feature_name']))
+    feature_models = sorted(feature_results, key=lambda x: feature_combination.index(x['feature_name']))
     
     # Remove feature_name from results as it's not needed anymore
-    for model in feature_models_stage2:
+    for model in feature_models:
         del model['feature_name']
     
-    # Stack test probabilities and apply calibrators
-    test_probs_list = [model['test_probs'] for model in feature_models_stage2]
-    
-    # Apply calibrators to test probabilities
-    calibrated_test_probs = []
-    for i, probs in enumerate(test_probs_list):
-        cal_test_probs = calibrators[i].transform(probs)
-        calibrated_test_probs.append(cal_test_probs)
-    
-    # Convert calibrated test probabilities to logits
-    X_meta_test = np.column_stack([logit(np.clip(probs, 0.001, 0.999)) for probs in calibrated_test_probs])
+    # Get logits from probabilities for each model
+    # Using logit function: log(p/(1-p)) which is the inverse of sigmoid
+    X_meta_val = np.column_stack([logit(np.clip(model['val_probs'], 0.001, 0.999)) for model in feature_models])
+    X_meta_test = np.column_stack([logit(np.clip(model['test_probs'], 0.001, 0.999)) for model in feature_models])
 
-    # Generate final test predictions using the learned meta-model weights
+    # --- MinMax scaling on validation logits, apply same scaler to test logits ---
+    from sklearn.preprocessing import MinMaxScaler
+    scaler = MinMaxScaler()
+    X_meta_val_scaled = scaler.fit_transform(X_meta_val)
+    X_meta_test = scaler.transform(X_meta_test)
+
+    # Train simplex logistic regression meta-model
+    w_simplex = train_simplex_logistic(X_meta_val, y_val)
+    meta_model = SimplexLogistic(w_simplex)
+
+    # Generate test predictions
+    meta_val_probs = meta_model.predict_proba(X_meta_val)[:, 1]
     meta_test_probs = meta_model.predict_proba(X_meta_test)[:, 1]
     
-    # Use validation data to find optimal threshold (from stage 1)
+    # Calculate metrics
+    auc = roc_auc_score(y_val, meta_val_probs)
+    bac = balanced_accuracy_score(y_val, meta_val_probs >= 0.5)
+    bac80, _, _, _ = calculate_bac(y_val, meta_val_probs, 0.8)
+    
     opt_threshold = find_optimal_threshold(y_val, meta_val_probs)
     meta_test_preds = (meta_test_probs >= opt_threshold).astype(int)
-    
-    print(f"Stage 2 - Final predictions generated using learned weights")
-    
-    # === STAGE 2 LOGGING ===
-    # Prepare probability data for logging
-    raw_test_probs = np.column_stack(test_probs_list)
-    calibrated_test_probs_matrix = np.column_stack(calibrated_test_probs)
-    logits_test = X_meta_test
-    
-    stage2_probs = {
-        'raw': raw_test_probs,
-        'calibrated': calibrated_test_probs_matrix,
-        'logits': logits_test,
-        'meta': meta_test_probs
-    }
-    
-    # Log Stage 2 analysis
-    #log_probability_analysis(stage2_probs, feature_combination, 'stage2_test')
-    
     return {
-        'feature_models': feature_models_stage2,  # Final retrained models
+        'feature_models': feature_models,
         'meta_model': meta_model,
-        'calibrators': calibrators,
-        'val_probs': meta_val_probs,  # From stage 1 for threshold selection
-        'test_probs': meta_test_probs,  # From stage 2 for final evaluation
+        'val_probs': meta_val_probs,
+        'test_probs': meta_test_probs,
         'test_preds': meta_test_preds,
         'opt_threshold': opt_threshold,
-        'auc': stage1_auc,  # Validation metrics from stage 1
-        'bac': stage1_bac,
-        'bac80': stage1_bac80,
+        'auc': auc,
+        'bac': bac,
+        'bac80': bac80,
         'lr_weights': meta_model.coef_[0],
     }
 
@@ -509,18 +381,16 @@ def save_results(results_df, predictions_df,RUN_NAME, run_n, seed):
 def main():
     """Main execution function with data preloading."""
     setup_environment()
-    description, labels, subjects, unique_subjects, subject_labels = load_data()
+    description, labels, subjects, unique_subjects, subject_labels = load_data(no_ied=True)
     
     # Preload all feature data once
     preload_all_feature_data()
-
-    checkpoint=False
     
     # Generate all feature combinations once before starting runs
     all_combinations = generate_feature_combinations()
     print(f"Generated {len(all_combinations)} feature combinations to evaluate")
     
-    # Evaluate each feature combination
+        # Evaluate each feature combination
     for combination in all_combinations:
         for run_n in range(N_RUNS):
 
@@ -533,39 +403,39 @@ def main():
             cp.random.seed(seed)
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
-            if not checkpoint:
-                if RUN_NAME == 'dwt+plv+mst+sst+sr+gplv_run_4' :    #   
-                    checkpoint = True
-                    print(f"Reached checkpoint: {RUN_NAME}, continuing with this and remaining runs...")
-                else:
-                    print(f"Skipping run {RUN_NAME} (before checkpoint)...")
-                    continue
-            
-            # # Skip run if it already exists in wandb with timeout
-            # try:
-            #     api = wandb.Api(timeout=200)
-            #     runs = api.runs(f"{wandb.config.entity}/{PROJECT_NAME}")
-            #     if any(run.name == RUN_NAME for run in runs):
-            #         print(f"Run {RUN_NAME} already exists in wandb, skipping...")
-            #         continue
-            # except Exception as e:
-            #     print(f"Could not check wandb API: {e}")
+            # check if project exists 
+  
 
-            wandb.init(project=PROJECT_NAME, name=RUN_NAME, dir=LOG_FOLDER)
+            # skip_flag = False
+            # for existing_run in wandb.Api().runs(path=PROJECT_NAME):
+            #     if existing_run.name == RUN_NAME:
+            #         print(f"Run {RUN_NAME} already exists, skipping...")
+            #         skip_flag = True
+            #         break
+            # if skip_flag:
+            #     continue
+            
+            wandb.init(project=PROJECT_NAME, name=RUN_NAME, reinit=True)
 
             wandb.config.seed = seed
             wandb.config.combination_length = len(combination)
             wandb.config.combination_name = combination_name
+        
             print(f'RUN {run_n+1}/{N_RUNS} - Seed: {seed}')
+            print(f"Using parallel training for {len(combination)} features with {min(N_PARALLEL_FEATURES, len(combination))} workers")
             
             # Initialize arrays to store predictions for this combination
             y_true_all = []
             y_pred_all = []
             y_prob_all = []
             subject_ids = []
-                      
+            
+            # Perform LOSO CV for this combination
+            print(f"Running LOSO CV for combination: {combination_name}")
+            
             # Iterate through all subjects (LOSO)
             for subject in unique_subjects:
+                print(f'Processing subject {subject} with {combination_name}')
                 
                 # Leave current subject out for testing
                 train_idxs, val_idxs, test_idxs = get_train_val_test_indices(
@@ -585,7 +455,7 @@ def main():
                     'validation/bac80:': ensemble_result['bac80'],
                     'validation/auc': ensemble_result['auc'],
                     'validation/bac': ensemble_result['bac'],
-                    'validation/weights': wandb.Histogram(ensemble_result['lr_weights'])
+                    'validation/opt_threshold': ensemble_result['opt_threshold'],
                 })
 
                 print(f'LR Weights: {ensemble_result["lr_weights"]}')
@@ -596,6 +466,7 @@ def main():
                 y_prob_all.extend(ensemble_result['test_probs'])
                 subject_ids.extend([subject] * len(y_test))
                 
+            
             # After LOSO CV is complete for this combination, calculate overall metrics
             print(f"LOSO CV complete for combination: {combination_name}, calculating metrics...")
             
@@ -622,12 +493,10 @@ def main():
             roc_line = wandb.plot.line(roc_table, "fpr", "tpr", title="ROC Curve")
             
             p, r, t = precision_recall_curve(y_true_all, y_prob_all)
-            pr_data = [[f, t] for f, t in zip(r, p)]
+            pr_data = [[f, t] for f, t in zip(p, r)]
             pr_table = wandb.Table(data=pr_data, columns=["precision", "recall"])
             pr_line = wandb.plot.line(pr_table, "precision", "recall", title="Precision-Recall Curve")
             
-            auprc = auc_sklearn(r, p)
-            ap = average_precision_score(y_true_all, y_prob_all)
 
             wandb.log({
                 'auc': auc,
@@ -639,9 +508,7 @@ def main():
                 'f1_score': f1,
                 'confusion_matrix': cm,
                 'roc_curve': roc_line,
-                'precision_recall_curve': pr_line,
-                'auprc': auprc,
-                'AP': ap
+                'precision_recall_curve': pr_line
             })
             # Prepare results DataFrame
             results = {
@@ -653,18 +520,16 @@ def main():
                 'accuracy': accuracy,
                 'precision': precision,
                 'recall': recall,
-                'f1_score': f1,
-                'auprc': auprc,
-                'AP': ap,
+                'f1_score': f1
             }
             results_df = pd.DataFrame([results])
             # Prepare predictions DataFrame
-            predictions_df = pd.DataFrame({
-                'subject_id': subject_ids,
-                'y_true': y_true_all,
-                'y_pred': y_pred_all,
-                'y_prob': y_prob_all
-            })
+            predictions_df = build_predictions_df(
+                y_test=y_true_all,
+                y_pred=y_pred_all,
+                y_prob=y_prob_all,
+                subject_ids=subject_ids
+            )
             # Save results and predictions
             save_results(results_df, predictions_df, RUN_NAME, run_n, seed)
             print(f"Results for combination {combination_name} saved successfully.")
