@@ -2,7 +2,7 @@ import enum
 import os
 import sys
 import numpy as np
-from utils import yash_features as yf
+from utils import feature_extraction_funcs as yf
 import pickle as pkl
 import mne
 import pandas as pd

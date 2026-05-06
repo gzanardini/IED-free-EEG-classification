@@ -24,8 +24,6 @@ import numpy as np
 import mne
 from joblib import Parallel, delayed
 
-from torch.utils.data import Dataset, ConcatDataset
-
 from .base import BaseDataset, BaseConcatDataset
 
 class TUH(BaseConcatDataset):

@@ -16,4 +16,5 @@ wandb/*
 *.pyc
 *wandb/*
 */wandb/*
+*/old things/*
 *.norsbebackup

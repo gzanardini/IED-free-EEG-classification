@@ -2,8 +2,9 @@ import enum
 import os
 import sys
 import numpy as np
-from utils import yash_features as yf
+from utils import feature_extraction_funcs as yf
 import pickle as pkl
+import mne
 import pandas as pd
 
 class HiddenPrints:
@@ -15,11 +16,10 @@ class HiddenPrints:
         sys.stdout.close()
         sys.stdout = self._original_stdout
 
-photostimulation_data_path = '/users/gzanardini/tuh_photostimulation_fulltrials'
-feature_path= '/space/gzanardini/tuh_features_whole/'
+photostimulation_data_path = '/space/gzanardini/tuh_eeg/preprocessed'
+feature_path= '/space/gzanardini/tuh_background/'
 
 stim_samples=pkl.load(open(os.path.join(photostimulation_data_path, 'stim_samples.pkl'), 'rb'))
-description=pd.read_csv(os.path.join(photostimulation_data_path, 'stim_df.csv'))
 
 FS=int(stim_samples[0].info['sfreq'])
 
@@ -27,7 +27,7 @@ combiner_names = ['mean', 'median', 'std', 'skewness', 'kurtosis']
 
 montages = ['CAR', 'Cz', 'BipolarDB', 'Laplacian']
 
-segment_lengths = [1,2,5,10]
+segment_lengths = [1,2,5,10,20,60,120]
 
 for montage in montages:
     for segment_length in segment_lengths:
@@ -35,7 +35,7 @@ for montage in montages:
         spectral_features = []
         for index,sample in enumerate(stim_samples):
             print(f'Processing sample {index+1}/{len(stim_samples)}')
-            data= sample.get_data()
+            data=sample.get_data()
 
             print(f"Data shape: {data.shape}")
             spectral_features.append(yf.run_spectral_seg2(data,FS,MONTAGE=montage,sec=segment_length))
