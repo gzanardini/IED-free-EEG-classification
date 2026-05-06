@@ -14,7 +14,6 @@ from scipy.fft import fft
 from stockwell import st
 import cmath
 import bct
-import matplotlib.pyplot as plt
 import warnings
 
 warnings.filterwarnings('ignore', category=RuntimeWarning)
