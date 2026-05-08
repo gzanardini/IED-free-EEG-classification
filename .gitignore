@@ -16,8 +16,8 @@ wandb/*
 *.pyc
 *wandb/*
 */wandb/*
-*/old things/*
+old things/*
 *.norsbebackup
 */INCONSISTENCIES.md
-*/tests/*
-*/plotting/*
+tests/*
+plotting/*
