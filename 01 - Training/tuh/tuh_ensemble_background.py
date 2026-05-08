@@ -1,3 +1,4 @@
+'''
 import os
 import wandb.plot
 from xgboost import XGBClassifier
@@ -73,7 +74,7 @@ best_parameters = {
 }
 
 def get_train_val_test_indices(description, labels, subject, seed):
-    """Get indices for train/validation/test splits for LOSO CV."""
+    #"""Get indices for train/validation/test splits for LOSO CV."""
     return build_train_val_test_indices(description, labels, subject, SPLIT_RATIO, seed)
 
 
@@ -81,7 +82,7 @@ def get_train_val_test_indices(description, labels, subject, seed):
 _feature_data_cache = {}
 
 def train_feature_model_parallel(args):
-    """Wrapper function for parallel feature model training."""
+    #"""Wrapper function for parallel feature model training."""
     seed = args[6]
     random.seed(seed)
     np.random.seed(seed)
@@ -93,7 +94,7 @@ def train_feature_model_parallel(args):
     )
 
 def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
-    """Train a model for a single feature using cached data."""
+    #"""Train a model for a single feature using cached data."""
     data = get_cached_feature_data(_feature_data_cache, feature_name)
     ratio = (len(y_train) - sum(y_train)) / sum(y_train)
     
@@ -132,7 +133,7 @@ def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, 
     }
 
 def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
-    """Train models for a combination of features in parallel and create an ensemble with two-stage training."""
+    #"""Train models for a combination of features in parallel and create an ensemble with two-stage training."""
     def log_stage1(stage1):
         wandb.log(
             {
@@ -176,7 +177,7 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
 
 
 def main():
-    """Main execution function with data preloading."""
+    #"""Main execution function with data preloading."""
     setup_environment(DEVICE, N_CUDA)
     description, labels, subjects, unique_subjects, subject_labels = load_subject_data(DATA_FOLDER)
     
@@ -343,6 +344,73 @@ def main():
 
 
  
+
+if __name__ == "__main__":
+    main()
+'''
+
+import cupy as cp
+
+from utils.model_training import EnsembleExperimentConfig, run_ensemble_experiment
+
+
+N_RUNS = 5
+N_CUDA = 0
+DEVICE = "cpu"
+PROJECT_NAME = "tuh_background"
+DATA_FOLDER = "/space/gzanardini/tuh_background/split"
+LOG_FOLDER = "/space/gzanardini/tuh/"
+N_JOBS_XGB = 1
+NUM_WORKERS = 10
+SIMPLEX_ALPHA = 1.05
+
+FEATURE_NAMES = ["cc", "cwt", "dwt", "plv", "mst", "sst", "spectral", "utm", "gcc", "gplv"]
+
+BEST_PARAMETERS = {
+    "spectral": ("BipolarDB", 2, "kurt"),
+    "cwt": ("Cz", 1, "skew"),
+    "dwt": ("Cz", 10, "skew"),
+    "mst": ("BipolarDB", 1, "median"),
+    "sst": ("Laplacian", 20, "std"),
+    "cc": ("CAR", 120, "mean"),
+    "plv": ("Cz", 60, "std"),
+    "gcc": ("Cz", 20, "kurt"),
+    "gplv": ("Laplacian", 10, "mean"),
+    "utm": ("Laplacian", 60, "median"),
+}
+
+
+def build_config():
+    return EnsembleExperimentConfig(
+        dataset_name="tuh_background",
+        project_name=PROJECT_NAME,
+        log_folder=LOG_FOLDER,
+        n_runs=N_RUNS,
+        run_name_template="{feature_set}_run_{run_n}",
+        device=DEVICE,
+        cuda_idx=N_CUDA,
+        wandb_reinit=True,
+        data_folder=DATA_FOLDER,
+        source_type="single_source",
+        feature_names=FEATURE_NAMES,
+        best_parameters=BEST_PARAMETERS,
+        cache_array_converter=cp.array,
+        n_jobs_xgb=N_JOBS_XGB,
+        n_parallel_features=NUM_WORKERS,
+        simplex_alpha=SIMPLEX_ALPHA,
+        xgb_params={
+            "n_estimators": 100,
+            "max_depth": 6,
+            "subsample": 0.9,
+            "gamma": 0.1,
+            "learning_rate": 0.01,
+        },
+    )
+
+
+def main():
+    run_ensemble_experiment(build_config())
+
 
 if __name__ == "__main__":
     main()

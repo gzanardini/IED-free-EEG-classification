@@ -44,13 +44,13 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # Configuration
 N_RUNS = 5
 N_CUDA = 0
-DEVICE = f'cuda:{N_CUDA}'
+DEVICE = 'cpu'
 SPLIT_RATIO = 0.3
-PROJECT_NAME = 'tuh_ips+bg'
-DATA_FOLDER_IPS = '/space/gzanardini/tuh_whole/split'
-DATA_FOLDER_BG = '/space/gzanardini/tuh_background/split'
-LOG_FOLDER = '/space/gzanardini/tuh/'
-N_JOBS_XGB = 1  # Set to 1 for compatibility with CUDA
+PROJECT_NAME = 'emc_ips+bg'
+DATA_FOLDER_IPS = '/space/gzanardini/emc_whole/split'
+DATA_FOLDER_BG = '/space/gzanardini/emc_background/split'
+LOG_FOLDER = '/space/gzanardini/emc/'
+N_JOBS_XGB = 4  # Set to 1 for compatibility with CUDA
 NUM_WORKERS = 10  # Number of max parallel workers for training
 N_PARALLEL_FEATURES = NUM_WORKERS  # Parallel feature training within combination
 SCIPY_ARRAY_API=1  # Enable SciPy array API for compatibility with cupy
@@ -62,50 +62,37 @@ feature_names = ['cc', 'cwt', 'dwt', 'plv', 'mst', 'sst', 'spectral', 'utm', 'gc
 combiners = ['mean', 'median', 'std', 'skew', 'kurt']
 
 best_parameters_ips = {
-    'spectral': ('CAR', 1 ,'skew'),
-    'cwt': ('BipolarDB', 60, 'std'),
-    'dwt': ('Cz', 10, 'skew'),
-    'mst': ('BipolarDB', 10, 'skew'),
-    'sst': ('Laplacian', 20, 'skew'),
-    'cc': ('Cz', 10, 'skew'),
-    'plv': ('Laplacian', 2, 'std'),
-    'gcc': ('CAR', 1, 'std'),
-    'gplv': ('BipolarDB', 1, 'mean'),
-    'utm': ('Laplacian', 60, 'mean')
+    'spectral': ('Cz',          10 ,    'std'),
+    'cwt':      ('BipolarDB',   2,      'median'),
+    'dwt':      ('Laplacian',   10,     'median'),
+    'mst':      ('BipolarDB',   60,     'median'),
+    'sst':      ('CAR',         10,     'median'),
+    'cc':       ('CAR',         1,      'std'),
+    'plv':      ('Laplacian',   60,      'kurt'),
+    'gcc':      ('CAR',         60,      'median'),
+    'gplv':     ('Laplacian',   2,      'std'),
+    'utm':      ('Laplacian',   20,     'std')
 }
-
-# legacy note:
-# utm Laplacian 60 median
-# spectral BipolarDB 2 kurt
-# plv Cz 60 std
-# cc CAR 120 mean
-# cwt Cz 1 skew
-# sst Laplacian 20 std
-# gplv Laplacian 10 mean
-# dwt Cz 10 skew
-# gcc Cz 20 kurt
-# mst BipolarDB 1 median
 
 best_parameters_background= {
-    'spectral': ('BipolarDB', 2, 'kurt'),
-    'cwt':      ('Cz',      1,      'skew'),
-    'dwt':      ('Cz',     10,     'skew'),
-    'mst':      ('BipolarDB', 1, 'median'),
-    'sst':      ('Laplacian', 20, 'std'),
-    'cc':       ('CAR', 120, 'mean'),
-    'plv':      ('Cz', 60, 'std'),
-    'gcc':      ('Cz', 20, 'kurt'),
-    'gplv':     ('Laplacian', 10, 'mean'),
-    'utm':      ('Laplacian', 60, 'median')
+    'spectral': ('Cz',          5 ,    'skew'),
+    'cwt':      ('Cz',          2,      'kurt'),
+    'dwt':      ('Laplacian',   10,     'median'),
+    'mst':      ('Cz',          60,     'mean'),
+    'sst':      ('Cz',          1,     'kurt'),
+    'cc':       ('BipolarDB',   2,      'median'),
+    'plv':      ('CAR',         2,      'mean'),
+    'gcc':      ('CAR',         2,      'mean'),
+    'gplv':     ('Cz',          20,     'median'),
+    'utm':      ('Laplacian',   20,     'median')
 }
-
+    
 
 
     
 
 
 
-# Global variable to store preloaded data
 _feature_data_cache = {}
 
 def train_feature_model_parallel(args):
@@ -161,6 +148,17 @@ def train_feature_model(feature_name, train_idxs, val_idxs, test_idxs, y_train, 
 
 def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, y_train, y_val, seed):
     """Train models for a combination of features in parallel and create an ensemble with two-stage training."""
+    def log_stage1(stage1):
+        wandb.log(
+            {
+                'stage1/auc': stage1['auc'],
+                'stage1/bac': stage1['bac'],
+                'stage1/bac80': stage1['bac80'],
+                'stage1/weights': wandb.Histogram(stage1['weights']),
+                'stage1/meta_probs': wandb.Histogram(stage1['meta_probs']),
+            }
+        )
+
     return shared_train_ensemble_models(
         feature_combination,
         train_idxs,
@@ -178,7 +176,7 @@ def train_ensemble_models(feature_combination, train_idxs, val_idxs, test_idxs, 
         find_optimal_threshold=find_optimal_threshold,
         train_simplex_logistic=train_simplex_logistic,
         SimplexLogistic=SimplexLogistic,
-        log_stage1=None,
+        log_stage1=log_stage1,
         log_stage2=None,
     )
  
@@ -231,22 +229,22 @@ def main():
             cp.random.seed(seed)
 
             RUN_NAME = f'{combination_name}_run_{run_n}'
-            # if not checkpoint:
-            #     if RUN_NAME == 'cc+dwt+mst+sst+gcc_run_1' :    #   for length 5 if crashes -> 'cc+cwt+utm+gcc+gplv_run_3'
-            #         checkpoint = True
-            #         print(f"Reached checkpoint: {RUN_NAME}, continuing with this and remaining runs...")
-            #     else:
-            #         print(f"Skipping run {RUN_NAME} (before checkpoint)...")
-            #         continue
+            if not checkpoint:
+                if RUN_NAME == 'cwt+dwt+plv+mst+gplv_run_2' :    #   for length 5 if crashes -> 'cc+cwt+utm+gcc+gplv_run_3'
+                    checkpoint = True
+                    print(f"Reached checkpoint: {RUN_NAME}, continuing with this and remaining runs...")
+                else:
+                    print(f"Skipping run {RUN_NAME} (before checkpoint)...")
+                    continue
 
-            # skip_flag = False
-            # for existing_run in wandb.Api(timeout=99).runs(path=PROJECT_NAME):
-            #     if existing_run.name == RUN_NAME:
-            #         print(f"Run {RUN_NAME} already exists, skipping...")
-            #         skip_flag = True
-            #         break
-            # if skip_flag:
-            #     continue
+            skip_flag = False
+            for existing_run in wandb.Api(timeout=99).runs(path=PROJECT_NAME):
+                if existing_run.name == RUN_NAME:
+                    print(f"Run {RUN_NAME} already exists, skipping...")
+                    skip_flag = True
+                    break
+            if skip_flag:
+                continue
 
             wandb.init(project=PROJECT_NAME, name=RUN_NAME, dir=LOG_FOLDER)
 
@@ -380,50 +378,61 @@ import cupy as cp
 
 from utils.model_training import EnsembleExperimentConfig, run_ensemble_experiment
 
-
 N_RUNS = 5
 N_CUDA = 0
-DEVICE = f"cuda:{N_CUDA}"
-PROJECT_NAME = "tuh_ips+bg"
-DATA_FOLDER_IPS = "/space/gzanardini/tuh_whole/split"
-DATA_FOLDER_BG = "/space/gzanardini/tuh_background/split"
-LOG_FOLDER = "/space/gzanardini/tuh/"
-N_JOBS_XGB = 1
+DEVICE = "cpu"
+PROJECT_NAME = "emc_ips+bg"
+DATA_FOLDER_IPS = "/space/gzanardini/emc_whole/split"
+DATA_FOLDER_BG = "/space/gzanardini/emc_background/split"
+LOG_FOLDER = "/space/gzanardini/emc/"
+N_JOBS_XGB = 4
 NUM_WORKERS = 10
 SIMPLEX_ALPHA = 1.05
 
 FEATURE_NAMES = ["cc", "cwt", "dwt", "plv", "mst", "sst", "spectral", "utm", "gcc", "gplv"]
 
 BEST_PARAMETERS_IPS = {
-    "spectral": ("CAR", 1, "skew"),
-    "cwt": ("BipolarDB", 60, "std"),
-    "dwt": ("Cz", 10, "skew"),
-    "mst": ("BipolarDB", 10, "skew"),
-    "sst": ("Laplacian", 20, "skew"),
-    "cc": ("Cz", 10, "skew"),
-    "plv": ("Laplacian", 2, "std"),
-    "gcc": ("CAR", 1, "std"),
-    "gplv": ("BipolarDB", 1, "mean"),
-    "utm": ("Laplacian", 60, "mean"),
+    "spectral": ("Cz", 10, "std"),
+    "cwt": ("BipolarDB", 2, "median"),
+    "dwt": ("Laplacian", 10, "median"),
+    "mst": ("BipolarDB", 60, "median"),
+    "sst": ("CAR", 10, "median"),
+    "cc": ("CAR", 1, "std"),
+    "plv": ("Laplacian", 60, "kurt"),
+    "gcc": ("CAR", 60, "median"),
+    "gplv": ("Laplacian", 2, "std"),
+    "utm": ("Laplacian", 20, "std"),
 }
 
 BEST_PARAMETERS_BACKGROUND = {
-    "spectral": ("BipolarDB", 2, "kurt"),
-    "cwt": ("Cz", 1, "skew"),
-    "dwt": ("Cz", 10, "skew"),
-    "mst": ("BipolarDB", 1, "median"),
-    "sst": ("Laplacian", 20, "std"),
-    "cc": ("CAR", 120, "mean"),
-    "plv": ("Cz", 60, "std"),
-    "gcc": ("Cz", 20, "kurt"),
-    "gplv": ("Laplacian", 10, "mean"),
-    "utm": ("Laplacian", 60, "median"),
+    "spectral": ("Cz", 5, "skew"),
+    "cwt": ("Cz", 2, "kurt"),
+    "dwt": ("Laplacian", 10, "median"),
+    "mst": ("Cz", 60, "mean"),
+    "sst": ("Cz", 1, "kurt"),
+    "cc": ("BipolarDB", 2, "median"),
+    "plv": ("CAR", 2, "mean"),
+    "gcc": ("CAR", 2, "mean"),
+    "gplv": ("Cz", 20, "median"),
+    "utm": ("Laplacian", 20, "median"),
 }
 
+BEST_PARAMETERS_HV = {
+    "sr": ("BipolarDB", 60, "skew"),
+    "cwt": ("CAR", 2, "median"),
+    "dwt": ("Laplacian", 60, "std"),
+    "mst": ("BipolarDB", 60, "kurtosis"),
+    "sst": ("BipolarDB", 60, "kurtosis"),
+    "cc": ("Laplacian", 60, "std"),
+    "plv": ("CAR", 60, "skew"),
+    "gcc": ("BipolarDB", 10, "skew"),
+    "gplv": ("BipolarDB", 2, "kurt"),
+    "utm": ("Cz", 10, "kurt"),
+}
 
 def build_config():
     return EnsembleExperimentConfig(
-        dataset_name="tuh_ips_background",
+        dataset_name="emc_ips_background_hv",
         project_name=PROJECT_NAME,
         log_folder=LOG_FOLDER,
         n_runs=N_RUNS,
@@ -441,6 +450,7 @@ def build_config():
         n_jobs_xgb=N_JOBS_XGB,
         n_parallel_features=NUM_WORKERS,
         simplex_alpha=SIMPLEX_ALPHA,
+        wandb_check_existing=True,
         xgb_params={
             "n_estimators": 100,
             "max_depth": 6,

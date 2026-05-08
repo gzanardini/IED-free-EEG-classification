@@ -15,8 +15,152 @@ from stockwell import st
 import cmath
 import bct
 import warnings
-
+import pickle as pkl
+import sys
 warnings.filterwarnings('ignore', category=RuntimeWarning)
+
+DEFAULT_INPUT_ROOT = "/space/gzanardini/tuh_eeg/preprocessed"
+DEFAULT_OUTPUT_ROOT = "/space/gzanardini/tuh_background"
+DEFAULT_BACKGROUND_FILE = "no_photostim_periods.pkl"
+DEFAULT_IPS_FILE = "stim_samples.pkl"
+DEFAULT_FS = 250
+DEFAULT_MONTAGES = ["CAR", "Cz", "BipolarDB", "Laplacian"]
+DEFAULT_SEGMENT_LENGTHS = [1, 2, 5, 10, 20, 60, 120]
+DEFAULT_FEATURE_TYPES = [
+    "spectral",
+    "cwt",
+    "dwt",
+    "mst",
+    "sst",
+    "utm",
+    "plv",
+    "gplv",
+    "cc",
+    "gcc",
+]
+
+SOURCE_FILES = {
+    "background": DEFAULT_BACKGROUND_FILE,
+    "ips": DEFAULT_IPS_FILE,
+}
+
+class HiddenPrints:
+    def __enter__(self):
+        self._original_stdout = sys.stdout
+        sys.stdout = open(os.devnull, "w")
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout.close()
+        sys.stdout = self._original_stdout
+
+
+def sample_to_array(sample):
+    if hasattr(sample, "get_data"):
+        return sample.get_data()
+    return sample
+
+
+def load_samples(source, input_root):
+    file_name = SOURCE_FILES[source]
+    file_path = os.path.join(input_root, file_name)
+
+    with open(file_path, "rb") as handle:
+        samples = pkl.load(handle)
+
+    if not samples:
+        raise ValueError(f"No samples found in {file_path}")
+
+    return samples, file_path
+
+
+def resolve_sampling_frequency(source, samples):
+    if source == "ips":
+        return int(samples[0].info["sfreq"])
+    return DEFAULT_FS
+
+
+def run_feature(feature_type, data, fs, montage, segment_length):
+    if feature_type == "spectral":
+        return run_spectral_seg2(data, fs, MONTAGE=montage, sec=segment_length)
+    if feature_type == "cwt":
+        return run_cwt_seg(
+            data,
+            Fs=fs,
+            MONTAGE=montage,
+            WAVELET_TYPE="morl",
+            sec=segment_length,
+        )
+    if feature_type == "dwt":
+        return run_dwt_seg(
+            data,
+            Fs=fs,
+            MONTAGE=montage,
+            WAVELET="db4",
+            sec=segment_length,
+        )
+    if feature_type == "mst":
+        return run_mST_seg(data, Fs=fs, MONTAGE=montage, epoch_width=segment_length)
+    if feature_type == "sst":
+        return run_sST_seg(data, Fs=fs, MONTAGE=montage, epoch_width=segment_length)
+    if feature_type == "utm":
+        return run_UTM_seg(data, Fs=fs, MONTAGE=montage, sec=segment_length)
+    if feature_type == "plv":
+        return run_plv_seg(data, Fs=fs, MONTAGE=montage, sec=segment_length)
+    if feature_type == "gplv":
+        with HiddenPrints():
+            return run_gplv_seg(data, Fs=fs, MONTAGE=montage, sec=segment_length)
+    if feature_type == "cc":
+        return run_cc_seg(data, Fs=fs, MONTAGE=montage, sec=segment_length)
+    if feature_type == "gcc":
+        with HiddenPrints():
+            return run_gcc_seg(data, Fs=fs, MONTAGE=montage, sec=segment_length)
+
+    raise ValueError(f"Unsupported feature type: {feature_type}")
+
+
+def process_source(source, input_root, output_root, montages, segment_lengths, feature_types, skip_existing=False):
+    samples, input_path = load_samples(source, input_root)
+    fs = resolve_sampling_frequency(source, samples)
+    feature_path = os.path.join(output_root, source)
+    os.makedirs(feature_path, exist_ok=True)
+
+    print(f"Loaded {len(samples)} samples from {input_path}")
+    print(f"Sampling frequency: {fs} Hz")
+    print(f"Saving features to: {feature_path}")
+    
+    combiner_names = ["mean", "median", "std", "skew", "kurt"]
+
+    for feature_type in feature_types:
+        for montage in montages:
+            for segment_length in segment_lengths:
+                output_file = os.path.join(
+                    feature_path,
+                    f"{feature_type}_{montage}_{segment_length}s.npy",
+                )
+
+                if skip_existing and os.path.exists(output_file):
+                    print(f"Skipping existing file: {output_file}")
+                    continue
+
+                print(f"Starting {feature_type} - {source} - {montage} {segment_length}s")
+                extracted_features = []
+
+                for index, sample in enumerate(samples):
+                    print(f"Processing sample {index + 1}/{len(samples)}")
+                    data = sample_to_array(sample)
+                    extracted_features.append(
+                        run_feature(feature_type, data, fs, montage, segment_length)
+                    )
+
+                extracted_features = np.array(extracted_features)
+                print(f"Finished {feature_type} - {source} - {montage} {segment_length}s")
+                print(f"Shape: {extracted_features.shape}")
+                
+                # Split and save individual statistical combiners
+                for idx, combiner_name in enumerate(combiner_names):
+                    combiner_data = extracted_features[:, idx, :]
+                    combiner_file = output_file.replace(".npy", f"_{combiner_name}.npy")
+                    np.save(combiner_file, combiner_data)
 
 def apply_montage(eeg_data, montage_type):
     """

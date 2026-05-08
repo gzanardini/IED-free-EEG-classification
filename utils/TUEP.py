@@ -9,7 +9,6 @@ Original Authors: Hubert Banville <hubert.jbanville@gmail.com>
          Simon Brandt <simonbrandt@protonmail.com>
          David Sabbagh <dav.sabbagh@gmail.com>
          Robin Schirrmeister <robintibor@gmail.com>
-
 License: BSD (3-clause)
 """
 
