@@ -1,4 +1,12 @@
 import cupy as cp
+import os
+import sys
+
+# Ensure the workspace root is on sys.path so local packages (like `utils`) are importable
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from utils.model_training import SingleSetExperimentConfig, run_single_set_experiment
 
 
@@ -33,11 +41,11 @@ def build_config():
         subjects_to_skip=SUBJECTS_TO_SKIP,
         xgb_params={
             "n_estimators": 100,
-            "max_depth": 7,
-            "subsample": 0.8,
+            "max_depth": 6,
+            "subsample": 0.9,
             "n_jobs": 4,
             "gamma": 0.1,
-            "learning_rate": 0.05,
+            "learning_rate": 0.1,
         },
         as_device_array=cp.array,
         metadata={"epochs": False},

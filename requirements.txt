@@ -1,0 +1,19 @@
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+mne
+xgboost
+wandb
+joblib
+tqdm
+statsmodels
+shap
+PyWavelets
+stockwell
+bctpy
+torch
+braindecode
+# Replace cupy-cuda11x with the CUDA build that matches your system.
+cupy-cuda11x

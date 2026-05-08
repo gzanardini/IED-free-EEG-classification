@@ -18,4 +18,6 @@ wandb/*
 */wandb/*
 */old things/*
 *.norsbebackup
-INCONSISTENCIES.md
+*/INCONSISTENCIES.md
+*/tests/*
+*/plotting/*

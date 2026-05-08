@@ -15,6 +15,14 @@ Example:
     python 000 - preprocess_tuh_epilepsy.py
 """
 
+import os
+import sys
+
+# Ensure the workspace root is on sys.path so local packages (like `utils`) are importable
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from utils.preprocessing import (
     load_dataset,
     select_by_channel,
