@@ -1,7 +1,7 @@
 # Classification of IED-free EEG responses for epilepsy diagnosis
 
 This repository contains the code for the EMBC2026 paper "Classification of IED-free EEG Responses for
-Assisted Epilepsy Diagnosis" avaiable [here](https://placeholder.com).
+Assisted Epilepsy Diagnosis" avaiable [here](https://doi.org/10.48550/arXiv.2510.06293).
 
 It includes preprocessing, feature extraction, training, evaluation, and explainability workflows for TUH and EMC datasets.
 
@@ -137,5 +137,5 @@ Naming conventions:
 
 ## References
 For the full list of references, see the [paper](https://example.com/paper).
-For an additional reference on a more extensive version of the work, see the author's MSc thesis [here](https://repository.tudelft.nl/record/uuid:e1e4aba1-87d0-477c-8264-bfb1509aa3ea)
+For an additional reference on a more extensive version of the work, see the author's MSc theses [here (G.Z.)](https://repository.tudelft.nl/record/uuid:e1e4aba1-87d0-477c-8264-bfb1509aa3ea) and [here (P.v.d.K](https://resolver.tudelft.nl/uuid:e89c0857-496b-40a4-9361-c5a94680b908)
 
